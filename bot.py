@@ -85,17 +85,17 @@ def article(link):
     return press, [p.strip() for p in body.split("\n") if len(p.strip()) > 30]
 
 
-def quote_for(kw, paras, desc):
-    """키워드가 나오는 첫 문단. 본문을 못 읽으면 검색 결과 요약으로 대체."""
-    hit = next((p for p in paras if kw in p), None) or desc
+def quote_for(kw, paras):
+    """키워드가 나오는 첫 문단, 없으면 첫 문단.
+    본문을 못 읽으면 빈 값 — 링크 미리보기가 요약을 대신하므로 인용구를 생략한다."""
+    hit = next((p for p in paras if kw in p), paras[0] if paras else "")
     return hit[:QUOTE_MAX] + ("…" if len(hit) > QUOTE_MAX else "")
 
 
 def format_msg(press, title, link, quote):
     head = f"[{press}] {title}" if press else title
-    return (f"<b>{html.escape(head)}</b>\n\n"
-            f"<blockquote>{html.escape(quote)}</blockquote>\n\n"
-            f"{link}")
+    block = f"<blockquote>{html.escape(quote)}</blockquote>\n\n" if quote else ""
+    return f"<b>{html.escape(head)}</b>\n\n{block}{link}"
 
 
 def send(msg):
@@ -127,7 +127,7 @@ def main():
             if why:  # 제외건도 seen 에는 남겨 다시 안 보게 한다
                 print(f"  제외({why}): {title[:40]}")
                 continue
-            queue.append((press, title, link, quote_for(kw, paras, desc)))
+            queue.append((press, title, link, quote_for(kw, paras)))
 
     for press, title, link, quote in reversed(queue):  # 오래된 것부터
         send(format_msg(press, title, link, quote))
@@ -168,17 +168,17 @@ def selftest():
     assert excluded("녹색당", "제목", [], "파리 특파원") == "리드"  # 본문 없으면 요약으로
     assert excluded("성소수자", "미국 대법원 판결", []) is None  # 다른 키워드엔 제외어 없음
     paras = ["녹색당 후보가 출마했다" + "x" * 30, "다른 문단" + "y" * 30]
-    assert quote_for("녹색당", paras, "요약") == paras[0]
-    assert quote_for("없는말", paras, "요약") == "요약"
-    assert quote_for("녹색당", [], "요약") == "요약"
-    assert len(quote_for("녹", ["녹" * 900], "")) == QUOTE_MAX + 1
+    assert quote_for("녹색당", paras) == paras[0]
+    assert quote_for("없는말", paras) == paras[0]      # 못 찾으면 첫 문단
+    assert quote_for("녹색당", []) == ""               # 본문 없으면 인용구 생략
+    assert len(quote_for("녹", ["녹" * 900])) == QUOTE_MAX + 1
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
         "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
-    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n\n")
+    assert format_msg("", "제목", "http://x", "") == "<b>제목</b>\n\nhttp://x"
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
         "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
-    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n\n")
+    assert format_msg("", "제목", "http://x", "") == "<b>제목</b>\n\nhttp://x"
     assert clean("따옴표 &quot;테스트&quot; ") == '따옴표 "테스트"'
     print("ok")
 
