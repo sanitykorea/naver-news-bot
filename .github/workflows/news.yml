@@ -11,6 +11,8 @@ jobs:
       - run: python3 bot.py
         env:
           KEYWORDS: ${{ vars.KEYWORDS }}
+          NAVER_ID: ${{ secrets.NAVER_ID }}
+          NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
       - run: |

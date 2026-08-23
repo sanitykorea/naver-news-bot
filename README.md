@@ -1,25 +1,30 @@
 # 네이버 뉴스 → 텔레그램 채널
 
-API 키 없음. 네이버 뉴스 검색 결과(최신순) HTML을 긁어서 새 기사만 발송한다.
+네이버 검색 API로 키워드별 최신 기사를 확인해 새 것만 텔레그램 채널로 보낸다.
 
-## 준비 (텔레그램만)
-@BotFather → `/newbot` → 토큰 받기. 채널 만들고 봇을 **관리자**로 추가(게시 권한).
-`TG_CHAT`은 공개 채널이면 `@채널아이디`, 비공개면 숫자 ID.
+## 설정
+```
+cp .env.example .env
+```
+`.env` 를 열어 값만 채운다 (NAVER_ID/NAVER_SECRET, TG_TOKEN, TG_CHAT, KEYWORDS).
+`.env` 는 `.gitignore` 에 있으니 커밋되지 않는다. 키를 채팅·이슈·커밋에 붙여넣지 말 것.
+
+- `TG_CHAT`: 공개 채널이면 `@채널아이디`, 비공개면 숫자 ID
+- 봇은 채널 **관리자**(게시 권한)로 추가되어 있어야 한다
 
 ## 실행
 ```
-KEYWORDS="성소수자,퀴어,트랜스젠더" TG_TOKEN=... TG_CHAT=@my_channel python3 bot.py
+python3 bot.py
 ```
 첫 실행은 발송 없이 `seen.json`만 만든다(과거 기사 폭탄 방지). 두 번째부터 새 기사만 발송.
-키워드당 최신 10건씩 확인하므로 30분~1시간 주기면 충분하다.
+키워드당 최신 30건 확인. 무료 한도 25,000회/일이라 10분 주기로 돌려도 남는다.
 
 ## 자동화
-- **맥에서**: `crontab -e` → `*/30 * * * * cd /Users/scottyoon/Claude_WORKSPACE/naver-news-bot && KEYWORDS="..." TG_TOKEN=... TG_CHAT=... /usr/bin/python3 bot.py`
-  (맥이 깨어 있을 때만 동작)
-- **GitHub Actions**: `.github/workflows/news.yml`. Secrets에 `TG_TOKEN`/`TG_CHAT`,
-  Variables에 `KEYWORDS` 등록. 단 네이버가 클라우드 IP를 막을 수 있으니 첫 실행 로그에
-  `결과 0건` 경고가 뜨는지 확인할 것. 막히면 맥 cron이나 집 서버로.
+- **맥**: `crontab -e` → `*/30 * * * * /usr/bin/python3 bot.py`
+  (`.env` 를 읽으므로 cron 에 키를 쓸 필요 없음. 맥이 깨어 있을 때만 동작)
+- **GitHub Actions**: `.github/workflows/news.yml`. 저장소 Settings > Secrets 에
+  `NAVER_ID` `NAVER_SECRET` `TG_TOKEN` `TG_CHAT`, Variables 에 `KEYWORDS` 등록.
+  30분마다 실행하고 `seen.json` 을 커밋해 상태를 유지한다.
 
-## 깨질 때
-네이버가 검색 페이지 HTML을 바꾸면 `결과 0건` 경고가 뜬다. `bot.py`의 `TITLE` 정규식만 고치면 된다.
-`python3 bot.py --test` 로 파서 자체 점검.
+## 참고
+`git log` 에 API 키 없이 검색 페이지를 파싱하는 이전 버전이 남아 있다 (`git show HEAD~1:bot.py`).
