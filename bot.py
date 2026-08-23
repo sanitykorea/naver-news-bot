@@ -20,11 +20,13 @@ def clean(s):
 
 
 def search(kw):
-    q = urllib.parse.urlencode({"query": kw, "display": 30, "sort": "date"})
+    q = urllib.parse.urlencode({"query": kw, "display": 30, "sort": "date", "format": "json"})
+    # NCP(NAVER API HUB) 발급 키. developers.naver.com 키를 쓸 거면
+    # openapi.naver.com/v1/search/news.json + X-Naver-Client-Id/Secret 으로.
     req = urllib.request.Request(
-        f"https://openapi.naver.com/v1/search/news.json?{q}",
-        headers={"X-Naver-Client-Id": os.environ["NAVER_ID"],
-                 "X-Naver-Client-Secret": os.environ["NAVER_SECRET"]})
+        f"https://naverapihub.apigw.ntruss.com/search/v1/news?{q}",
+        headers={"X-NCP-APIGW-API-KEY-ID": os.environ["NAVER_ID"],
+                 "X-NCP-APIGW-API-KEY": os.environ["NAVER_SECRET"]})
     with urllib.request.urlopen(req, timeout=20) as r:
         items = json.load(r)["items"]
     # 네이버뉴스 페이지가 있으면 그 링크, 없으면 언론사 원문
