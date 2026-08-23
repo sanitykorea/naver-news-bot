@@ -14,10 +14,18 @@ if ENV.exists():  # ponytail: python-dotenv 대신 4줄
 
 KEYWORDS = [k.strip() for k in os.environ.get("KEYWORDS", "성소수자").split(",") if k.strip()]
 
-# ponytail: 키워드별 제외어. 기사 "제목"에 하나라도 있으면 발송 안 함. 늘어나면 여기만 추가.
-# 헤드라인은 한자 약칭을 자주 쓰므로 같이 넣는다 (호주는 濠/豪 둘 다 쓰임).
-EXCLUDE = {"녹색당": ("영국", "英", "프랑스", "佛", "호주", "濠", "豪",
-                     "미국", "美", "캐나다", "加", "독일", "獨")}
+# ponytail: 키워드별 제외어. 국가명 + 헤드라인용 한자 약칭 + 주요 도시/지역.
+# 도시까지 넣는 이유: "파리 명물 흉상" 처럼 제목에 국가명이 안 나오는 해외 기사를 잡기 위해.
+EXCLUDE = {"녹색당": ("영국", "英", "런던", "잉글랜드", "스코틀랜드", "웨일스",
+                     "프랑스", "佛", "파리", "마르세유", "리옹",
+                     "호주", "濠", "豪", "시드니", "멜버른", "캔버라",
+                     "미국", "美", "워싱턴", "뉴욕", "백악관", "실리콘밸리",
+                     "캐나다", "加", "토론토", "밴쿠버", "오타와",
+                     "독일", "獨", "베를린", "뮌헨", "함부르크")}
+# ponytail: 위치+빈도 휴리스틱. 제목/리드에 나오면 그 기사의 주제고,
+# 중반 이후 한두 번은 비교 사례라 통과시킨다. 오탐이 잦으면 숫자만 조절할 것.
+LEAD_PARAS = 2      # 리드로 볼 문단 수
+MENTION_LIMIT = 3   # 본문 전체에서 이 횟수 이상 나오면 비중이 높다고 본다
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 QUOTE_MAX = 700
 
@@ -40,8 +48,19 @@ def search(kw):
     return [(clean(i["title"]), i.get("link") or i["originallink"], clean(i["description"])) for i in items]
 
 
-def excluded(kw, title):
-    return any(w in title for w in EXCLUDE.get(kw, ()))
+def excluded(kw, title, paras, desc=""):
+    """제외 사유 문자열, 통과면 None."""
+    words = EXCLUDE.get(kw, ())
+    if not words:
+        return None
+    if any(w in title for w in words):
+        return "제목"
+    lead = " ".join(paras[:LEAD_PARAS]) or desc  # 본문을 못 읽으면 검색 요약으로 대신
+    if any(w in lead for w in words):
+        return "리드"
+    body = " ".join(paras)
+    n = sum(body.count(w) for w in words)
+    return f"본문 {n}회" if n >= MENTION_LIMIT else None
 
 
 def paragraphs(link):
@@ -91,9 +110,14 @@ def main():
                 continue
             known.add(link)
             fresh.append(link)
-            if first_run or excluded(kw, title):
-                continue  # 제외건도 seen 에는 남겨 다시 안 보게 한다
-            queue.append((title, link, quote_for(kw, paragraphs(link), desc)))
+            if first_run:
+                continue
+            paras = paragraphs(link)
+            why = excluded(kw, title, paras, desc)
+            if why:  # 제외건도 seen 에는 남겨 다시 안 보게 한다
+                print(f"  제외({why}): {title[:40]}")
+                continue
+            queue.append((title, link, quote_for(kw, paras, desc)))
 
     for title, link, quote in reversed(queue):  # 오래된 것부터
         send(f"{html.escape(title)}\n{link}\n\n<blockquote>{html.escape(quote)}</blockquote>")
@@ -127,10 +151,12 @@ def check():
 
 
 def selftest():
-    assert excluded("녹색당", "英 총선서 녹색당 약진")
-    assert excluded("녹색당", "독일 녹색당 지지율")
-    assert not excluded("녹색당", "고양에는 골프장보다 숲이 더 필요하다")
-    assert not excluded("성소수자", "미국 대법원 판결")  # 다른 키워드엔 제외어 없음
+    assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"
+    assert excluded("녹색당", "흉상 성추행 논란", ["파리 명물이 수난이다" + "x" * 30]) == "리드"
+    assert excluded("녹색당", "국내 기사", ["국내" * 20] * 3 + ["독일 미국 영국 사례"]) == "본문 3회"
+    assert excluded("녹색당", "국내 기사", ["국내" * 20] * 3 + ["독일 사례도 있다"]) is None
+    assert excluded("녹색당", "제목", [], "파리 특파원") == "리드"  # 본문 없으면 요약으로
+    assert excluded("성소수자", "미국 대법원 판결", []) is None  # 다른 키워드엔 제외어 없음
     paras = ["녹색당 후보가 출마했다" + "x" * 30, "다른 문단" + "y" * 30]
     assert quote_for("녹색당", paras, "요약") == paras[0]
     assert quote_for("없는말", paras, "요약") == "요약"
