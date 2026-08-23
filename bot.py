@@ -66,6 +66,19 @@ def excluded(kw, title, paras, desc=""):
     return f"본문 {n}회" if n >= MENTION_LIMIT else None
 
 
+# ponytail: 기사 문단에 늘 따라붙는 군더더기. 문단 앞뒤에 붙은 것만 떼고 본문 중간은 안 건드린다.
+BYLINE = re.compile(r"[\s/·]*[가-힣]{2,5}\s*(?:기자|특파원|객원기자|선임기자|논설위원|PD|앵커)\s*$")
+EMAIL = re.compile(r"\s*[\w.+-]+@[\w.-]+\.\w+\s*$")
+DATELINE = re.compile(r"^\[[^\]]{1,30}\]\s*(?:[가-힣]{2,5}\s*기자\s*=?\s*)?")
+
+
+def tidy(para):
+    para = DATELINE.sub("", para.strip())
+    for _ in range(2):  # 이메일 뒤에 기자명이 또 오는 경우가 있다
+        para = BYLINE.sub("", EMAIL.sub("", para)).strip()
+    return para
+
+
 def article(link):
     """(언론사, 본문 문단들). 언론사 원문 링크는 형식이 제각각이라 포기하고 빈 값."""
     if "n.news.naver.com" not in link:
@@ -85,7 +98,7 @@ def article(link):
     body = re.sub(r"<(script|style)\b.*?</\1>", "", m.group(1), flags=re.S)
     body = re.sub(r"<br\s*/?>", "\n", body)
     body = html.unescape(re.sub(r"<[^>]+>", "", body))
-    return press, [p.strip() for p in body.split("\n") if len(p.strip()) > 30]
+    return press, [t for t in (tidy(p) for p in body.split("\n")) if len(t) > 30]
 
 
 def quote_for(kw, paras):
@@ -189,10 +202,20 @@ def selftest():
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
         "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
     assert format_msg("", "제목", "http://x", "") == "<b>제목</b>\n\nhttp://x"
+    assert tidy("인권침해 소지가 있다며 개정을 권고했다. /김태연 기자") == "인권침해 소지가 있다며 개정을 권고했다."
+    assert tidy("[서울=뉴시스] 김태연 기자 = 인권위는 21일 밝혔다.") == "인권위는 21일 밝혔다."
+    assert tidy("본문이다. hong@news.co.kr") == "본문이다."
+    assert tidy("본문이다. 김태연 기자 hong@news.co.kr") == "본문이다."
+    assert tidy("김 기자와 만난 자리에서 말했다") == "김 기자와 만난 자리에서 말했다"  # 중간은 안 건드림
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
         "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
     assert format_msg("", "제목", "http://x", "") == "<b>제목</b>\n\nhttp://x"
+    assert tidy("인권침해 소지가 있다며 개정을 권고했다. /김태연 기자") == "인권침해 소지가 있다며 개정을 권고했다."
+    assert tidy("[서울=뉴시스] 김태연 기자 = 인권위는 21일 밝혔다.") == "인권위는 21일 밝혔다."
+    assert tidy("본문이다. hong@news.co.kr") == "본문이다."
+    assert tidy("본문이다. 김태연 기자 hong@news.co.kr") == "본문이다."
+    assert tidy("김 기자와 만난 자리에서 말했다") == "김 기자와 만난 자리에서 말했다"  # 중간은 안 건드림
     assert clean("따옴표 &quot;테스트&quot; ") == '따옴표 "테스트"'
     print("ok")
 
