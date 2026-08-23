@@ -28,6 +28,9 @@ LEAD_PARAS = 2      # 리드로 볼 문단 수
 MENTION_LIMIT = 3   # 본문 전체에서 이 횟수 이상 나오면 비중이 높다고 본다
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 QUOTE_MAX = 700
+# ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
+# 한 번에 이만큼 넘으면 발송을 건너뛰고 기록만 한다 (첫 실행과 같은 처리).
+MAX_BURST = 30
 
 
 def clean(s):
@@ -129,6 +132,10 @@ def main():
                 continue
             queue.append((press, title, link, quote_for(kw, paras)))
 
+    if len(queue) > MAX_BURST:
+        print(f"발송 대상 {len(queue)}건 — {MAX_BURST}건을 넘어 발송을 건너뛰고 기록만 한다.")
+        print("(키워드를 추가했다면 정상. 다음 실행부터 새 기사만 발송된다)")
+        queue = []
     for press, title, link, quote in reversed(queue):  # 오래된 것부터
         send(format_msg(press, title, link, quote))
 
