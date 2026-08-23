@@ -14,8 +14,10 @@ if ENV.exists():  # ponytail: python-dotenv 대신 4줄
 
 KEYWORDS = [k.strip() for k in os.environ.get("KEYWORDS", "성소수자").split(",") if k.strip()]
 
-# ponytail: 키워드별 제외어. 본문/제목에 하나라도 있으면 발송 안 함. 늘어나면 여기만 추가.
-EXCLUDE = {"녹색당": ("영국", "프랑스", "호주", "미국", "캐나다", "독일")}
+# ponytail: 키워드별 제외어. 기사 "제목"에 하나라도 있으면 발송 안 함. 늘어나면 여기만 추가.
+# 헤드라인은 한자 약칭을 자주 쓰므로 같이 넣는다 (호주는 濠/豪 둘 다 쓰임).
+EXCLUDE = {"녹색당": ("영국", "英", "프랑스", "佛", "호주", "濠", "豪",
+                     "미국", "美", "캐나다", "加", "독일", "獨")}
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 QUOTE_MAX = 700
 
@@ -36,6 +38,10 @@ def search(kw):
         items = json.load(r)["items"]
     # 네이버뉴스 페이지가 있으면 그 링크, 없으면 언론사 원문
     return [(clean(i["title"]), i.get("link") or i["originallink"], clean(i["description"])) for i in items]
+
+
+def excluded(kw, title):
+    return any(w in title for w in EXCLUDE.get(kw, ()))
 
 
 def paragraphs(link):
@@ -85,13 +91,9 @@ def main():
                 continue
             known.add(link)
             fresh.append(link)
-            if first_run:
-                continue
-            paras = paragraphs(link)
-            banned = EXCLUDE.get(kw, ())
-            if any(w in title + desc + " ".join(paras) for w in banned):
-                continue  # 제외어 걸림 — seen 에는 남겨 다시 안 보게 한다
-            queue.append((title, link, quote_for(kw, paras, desc)))
+            if first_run or excluded(kw, title):
+                continue  # 제외건도 seen 에는 남겨 다시 안 보게 한다
+            queue.append((title, link, quote_for(kw, paragraphs(link), desc)))
 
     for title, link, quote in reversed(queue):  # 오래된 것부터
         send(f"{html.escape(title)}\n{link}\n\n<blockquote>{html.escape(quote)}</blockquote>")
@@ -125,6 +127,10 @@ def check():
 
 
 def selftest():
+    assert excluded("녹색당", "英 총선서 녹색당 약진")
+    assert excluded("녹색당", "독일 녹색당 지지율")
+    assert not excluded("녹색당", "고양에는 골프장보다 숲이 더 필요하다")
+    assert not excluded("성소수자", "미국 대법원 판결")  # 다른 키워드엔 제외어 없음
     paras = ["녹색당 후보가 출마했다" + "x" * 30, "다른 문단" + "y" * 30]
     assert quote_for("녹색당", paras, "요약") == paras[0]
     assert quote_for("없는말", paras, "요약") == "요약"
