@@ -92,9 +92,9 @@ def quote_for(kw, paras, desc):
 
 
 def format_msg(press, title, link, quote):
-    head = f"[{press}]{title}" if press else title
-    return (f"<b>{html.escape(head)}</b>\n"
-            f"<blockquote>{html.escape(quote)}</blockquote>\n"
+    head = f"[{press}] {title}" if press else title
+    return (f"<b>{html.escape(head)}</b>\n\n"
+            f"<blockquote>{html.escape(quote)}</blockquote>\n\n"
             f"{link}")
 
 
@@ -173,12 +173,12 @@ def selftest():
     assert quote_for("녹색당", [], "요약") == "요약"
     assert len(quote_for("녹", ["녹" * 900], "")) == QUOTE_MAX + 1
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
-        "<b>[한겨레]제목</b>\n<blockquote>인용</blockquote>\nhttp://x")
-    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n")
+        "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
+    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n\n")
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
-        "<b>[한겨레]제목</b>\n<blockquote>인용</blockquote>\nhttp://x")
-    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n")
+        "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
+    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n\n")
     assert clean("따옴표 &quot;테스트&quot; ") == '따옴표 "테스트"'
     print("ok")
 
