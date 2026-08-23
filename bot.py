@@ -39,7 +39,10 @@ def send(msg):
         data=json.dumps({"chat_id": os.environ["TG_CHAT"], "text": msg,
                          "parse_mode": "HTML"}).encode(),
         headers={"Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=20).read()
+    try:
+        urllib.request.urlopen(req, timeout=20).read()
+    except urllib.error.HTTPError as e:  # 텔레그램 에러 사유를 그대로 보여준다
+        raise SystemExit(f"텔레그램 발송 실패 {e.code}: {e.read().decode()}")
 
 
 def main():
@@ -58,6 +61,19 @@ def main():
 
     SEEN.write_text(json.dumps(([l for _, _, l in new] + seen)[:KEEP], ensure_ascii=False))
     print(f"{len(new)}건 {'저장' if first_run else '발송'}")
+
+
+def chatid():
+    """채널을 봇 관리자로 추가하고 아무 글이나 올린 뒤 실행하면 숫자 ID를 알려준다."""
+    with urllib.request.urlopen(
+            f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/getUpdates", timeout=30) as r:
+        ups = json.load(r)["result"]
+    seen_chats = {u[k]["chat"]["id"]: u[k]["chat"]
+                  for u in ups for k in ("channel_post", "message", "my_chat_member") if k in u}
+    if not seen_chats:
+        print("업데이트 없음 — 봇을 채널 관리자로 추가하고 채널에 아무 글이나 올린 뒤 다시 실행")
+    for cid, c in seen_chats.items():
+        print(f"TG_CHAT={cid}   ({c['type']}: {c.get('title') or c.get('username')})")
 
 
 def check():
@@ -82,5 +98,7 @@ if __name__ == "__main__":
         selftest()
     elif "--check" in sys.argv:
         check()
+    elif "--chatid" in sys.argv:
+        chatid()
     else:
         main()
