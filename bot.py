@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """네이버 뉴스 검색(최신순) → 새 기사만 텔레그램 채널로 발송."""
-import html, json, os, pathlib, re, sys, urllib.parse, urllib.request
+import html, json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
 
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN = HERE / ".env", HERE / "seen.json"
@@ -58,6 +58,17 @@ def main():
     print(f"{len(new)}건 {'저장' if first_run else '발송'}")
 
 
+def check():
+    """키 값은 출력하지 않고 형태와 인증만 점검."""
+    for k in ("NAVER_ID", "NAVER_SECRET", "TG_TOKEN", "TG_CHAT"):
+        v = os.environ.get(k)
+        print(f"{k}: {'없음' if v is None else str(len(v)) + '자'}")
+    try:
+        print("네이버 검색 API:", len(search("테스트")), "건 — 정상")
+    except urllib.error.HTTPError as e:
+        print("네이버 검색 API 실패:", e.code, e.read().decode()[:150])
+
+
 def selftest():
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert clean("따옴표 &quot;테스트&quot; ") == '따옴표 "테스트"'
@@ -65,4 +76,9 @@ def selftest():
 
 
 if __name__ == "__main__":
-    selftest() if "--test" in sys.argv else main()
+    if "--test" in sys.argv:
+        selftest()
+    elif "--check" in sys.argv:
+        check()
+    else:
+        main()
