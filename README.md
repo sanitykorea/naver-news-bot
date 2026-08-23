@@ -1,30 +1,45 @@
 # 네이버 뉴스 → 텔레그램 채널
 
-네이버 검색 API로 키워드별 최신 기사를 확인해 새 것만 텔레그램 채널로 보낸다.
+키워드로 네이버 뉴스를 검색해 새 기사만 텔레그램 채널로 보낸다.
+제목·링크 아래 본문 중 키워드가 나오는 문단을 인용구로 붙인다.
 
 ## 설정
 ```
 cp .env.example .env
 ```
-`.env` 를 열어 값만 채운다 (NAVER_ID/NAVER_SECRET, TG_TOKEN, TG_CHAT, KEYWORDS).
-`.env` 는 `.gitignore` 에 있으니 커밋되지 않는다. 키를 채팅·이슈·커밋에 붙여넣지 말 것.
+`.env` 에 값을 채운다. `.gitignore` 에 있어 커밋되지 않는다.
 
-- `TG_CHAT`: 공개 채널이면 `@채널아이디`, 비공개면 숫자 ID
-- 봇은 채널 **관리자**(게시 권한)로 추가되어 있어야 한다
+- `NAVER_ID` / `NAVER_SECRET`: NCP 콘솔 > AI·NAVER API > Application > 인증 정보
+  (NCP 발급 키는 `naverapihub.apigw.ntruss.com` + `X-NCP-APIGW-*` 헤더를 쓴다.
+   developers.naver.com 키라면 `openapi.naver.com` + `X-Naver-Client-*` 로 바꿔야 한다)
+- `TG_TOKEN`: @BotFather
+- `TG_CHAT`: 숫자 채널 ID. 봇을 채널 관리자로 넣고 아무 글이나 올린 뒤 `python3 bot.py --chatid`
+- `KEYWORDS`: 쉼표로 나열
 
 ## 실행
 ```
-python3 bot.py
+python3 bot.py            # 발송
+python3 bot.py --check    # 키 인증 점검 (값은 출력하지 않음)
+python3 bot.py --chatid   # 채널 숫자 ID 확인
+python3 bot.py --test     # 필터·인용 로직 자체 점검
 ```
-첫 실행은 발송 없이 `seen.json`만 만든다(과거 기사 폭탄 방지). 두 번째부터 새 기사만 발송.
-키워드당 최신 30건 확인. 무료 한도 25,000회/일이라 10분 주기로 돌려도 남는다.
+첫 실행은 발송 없이 `seen.json` 만 만든다(과거 기사 폭탄 방지).
 
-## 자동화
-- **맥**: `crontab -e` → `*/30 * * * * /usr/bin/python3 bot.py`
-  (`.env` 를 읽으므로 cron 에 키를 쓸 필요 없음. 맥이 깨어 있을 때만 동작)
-- **GitHub Actions**: `.github/workflows/news.yml`. 저장소 Settings > Secrets 에
-  `NAVER_ID` `NAVER_SECRET` `TG_TOKEN` `TG_CHAT`, Variables 에 `KEYWORDS` 등록.
-  30분마다 실행하고 `seen.json` 을 커밋해 상태를 유지한다.
+## 해외 기사 제외
+`EXCLUDE` 에 키워드별 제외어(국가명·한자 약칭·주요 도시)를 둔다. 판정은 3단계:
 
-## 참고
-`git log` 에 API 키 없이 검색 페이지를 파싱하는 이전 버전이 남아 있다 (`git show HEAD~1:bot.py`).
+| 위치 | 처리 |
+|---|---|
+| 제목에 있음 | 제외 |
+| 리드(첫 `LEAD_PARAS` 문단)에 있음 | 제외 |
+| 본문 전체 `MENTION_LIMIT` 회 이상 | 제외 |
+| 그 외 | 통과 (비교 사례로 한두 번 언급된 경우) |
+
+제외된 기사는 실행 로그에 사유와 함께 찍힌다. 세다 싶으면 두 숫자만 올리면 된다.
+
+## 자동화 (GitHub Actions)
+`.github/workflows/news.yml` — 5분마다 실행(GitHub cron 최소 간격, 부하 시 지연될 수 있음).
+상태(`seen.json`)는 커밋 대신 Actions 캐시에 보관한다.
+
+저장소 Settings > Secrets and variables > Actions > Secrets 에 5개 등록:
+`KEYWORDS` `NAVER_ID` `NAVER_SECRET` `TG_TOKEN` `TG_CHAT`
