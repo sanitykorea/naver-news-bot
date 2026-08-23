@@ -63,29 +63,39 @@ def excluded(kw, title, paras, desc=""):
     return f"본문 {n}회" if n >= MENTION_LIMIT else None
 
 
-def paragraphs(link):
-    """네이버뉴스 본문 문단 목록. 언론사 원문 링크는 형식이 제각각이라 포기하고 빈 목록."""
+def article(link):
+    """(언론사, 본문 문단들). 언론사 원문 링크는 형식이 제각각이라 포기하고 빈 값."""
     if "n.news.naver.com" not in link:
-        return []
+        return "", []
     try:
         req = urllib.request.Request(link, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=20) as r:
             page = r.read().decode("utf-8", "replace")
     except Exception:
-        return []
+        return "", []
+    # <meta property="og:article:author" content="경향신문 | 네이버">
+    a = re.search(r'og:article:author" content="([^"|]+)', page)
+    press = html.unescape(a.group(1)).strip() if a else ""
     m = re.search(r'<article[^>]*id="dic_area"[^>]*>(.*?)</article>', page, re.S)
     if not m:
-        return []
+        return press, []
     body = re.sub(r"<(script|style)\b.*?</\1>", "", m.group(1), flags=re.S)
     body = re.sub(r"<br\s*/?>", "\n", body)
     body = html.unescape(re.sub(r"<[^>]+>", "", body))
-    return [p.strip() for p in body.split("\n") if len(p.strip()) > 30]
+    return press, [p.strip() for p in body.split("\n") if len(p.strip()) > 30]
 
 
 def quote_for(kw, paras, desc):
     """키워드가 나오는 첫 문단. 본문을 못 읽으면 검색 결과 요약으로 대체."""
     hit = next((p for p in paras if kw in p), None) or desc
     return hit[:QUOTE_MAX] + ("…" if len(hit) > QUOTE_MAX else "")
+
+
+def format_msg(press, title, link, quote):
+    head = f"[{press}]{title}" if press else title
+    return (f"<b>{html.escape(head)}</b>\n"
+            f"<blockquote>{html.escape(quote)}</blockquote>\n"
+            f"{link}")
 
 
 def send(msg):
@@ -112,15 +122,15 @@ def main():
             fresh.append(link)
             if first_run:
                 continue
-            paras = paragraphs(link)
+            press, paras = article(link)
             why = excluded(kw, title, paras, desc)
             if why:  # 제외건도 seen 에는 남겨 다시 안 보게 한다
                 print(f"  제외({why}): {title[:40]}")
                 continue
-            queue.append((title, link, quote_for(kw, paras, desc)))
+            queue.append((press, title, link, quote_for(kw, paras, desc)))
 
-    for title, link, quote in reversed(queue):  # 오래된 것부터
-        send(f"{html.escape(title)}\n{link}\n\n<blockquote>{html.escape(quote)}</blockquote>")
+    for press, title, link, quote in reversed(queue):  # 오래된 것부터
+        send(format_msg(press, title, link, quote))
 
     SEEN.write_text(json.dumps((fresh + seen)[:KEEP], ensure_ascii=False))
     print(f"새 기사 {len(fresh)}건 / " + ("저장만 (첫 실행)" if first_run else f"발송 {len(queue)}건"))
@@ -162,7 +172,13 @@ def selftest():
     assert quote_for("없는말", paras, "요약") == "요약"
     assert quote_for("녹색당", [], "요약") == "요약"
     assert len(quote_for("녹", ["녹" * 900], "")) == QUOTE_MAX + 1
+    assert format_msg("한겨레", "제목", "http://x", "인용") == (
+        "<b>[한겨레]제목</b>\n<blockquote>인용</blockquote>\nhttp://x")
+    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n")
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
+    assert format_msg("한겨레", "제목", "http://x", "인용") == (
+        "<b>[한겨레]제목</b>\n<blockquote>인용</blockquote>\nhttp://x")
+    assert format_msg("", "제목", "http://x", "인용").startswith("<b>제목</b>\n")
     assert clean("따옴표 &quot;테스트&quot; ") == '따옴표 "테스트"'
     print("ok")
 
