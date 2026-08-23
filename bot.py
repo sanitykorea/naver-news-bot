@@ -121,8 +121,8 @@ def main():
     if missing:
         raise SystemExit("설정 누락: " + ", ".join(missing))
 
-    first_run = not SEEN.exists()
-    seen = [] if first_run else json.loads(SEEN.read_text())
+    seen = json.loads(SEEN.read_text()) if SEEN.exists() else []
+    first_run = not seen  # 빈 목록도 첫 실행. 있으나 마나 한 파일에 속아 전체를 발송하지 않는다
     known, fresh, queue = set(seen), [], []
     for kw in KEYWORDS:
         for title, link, desc in search(kw):
