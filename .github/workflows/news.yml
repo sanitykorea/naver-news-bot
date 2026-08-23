@@ -1,20 +1,23 @@
 name: naver-news-telegram
 on:
-  schedule: [{cron: "*/30 * * * *"}]   # 30분마다
+  schedule: [{cron: "*/5 * * * *"}]   # GitHub cron 최소 간격. 부하에 따라 지연될 수 있음
   workflow_dispatch:
-permissions: {contents: write}
+concurrency: {group: news}            # 실행이 겹쳐 중복 발송되는 것 방지
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ponytail: seen.json 을 커밋하는 대신 캐시로 넘긴다. 5분 주기면 커밋이 월 8천 건.
+      - uses: actions/cache@v4
+        with:
+          path: seen.json
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
       - run: python3 bot.py
         env:
-          KEYWORDS: ${{ vars.KEYWORDS }}
+          KEYWORDS: ${{ secrets.KEYWORDS }}
           NAVER_ID: ${{ secrets.NAVER_ID }}
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
-      - run: |
-          git config user.name bot && git config user.email bot@local
-          git add seen.json && git diff --cached --quiet || git commit -m "seen" && git push
