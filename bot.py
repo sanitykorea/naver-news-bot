@@ -114,6 +114,13 @@ def send(msg):
 
 
 def main():
+    # 시크릿이 없으면 GitHub 는 빈 문자열을 넘긴다. 조용히 성공하는 대신 여기서 죽는다.
+    missing = [k for k in ("NAVER_ID", "NAVER_SECRET", "TG_TOKEN", "TG_CHAT") if not os.environ.get(k)]
+    if not KEYWORDS:
+        missing.append("KEYWORDS")
+    if missing:
+        raise SystemExit("설정 누락: " + ", ".join(missing))
+
     first_run = not SEEN.exists()
     seen = [] if first_run else json.loads(SEEN.read_text())
     known, fresh, queue = set(seen), [], []
