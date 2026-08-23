@@ -14,6 +14,11 @@ if ENV.exists():  # ponytail: python-dotenv 대신 4줄
 
 KEYWORDS = [k.strip() for k in os.environ.get("KEYWORDS", "성소수자").split(",") if k.strip()]
 
+# ponytail: 키워드별 제외어. 본문/제목에 하나라도 있으면 발송 안 함. 늘어나면 여기만 추가.
+EXCLUDE = {"녹색당": ("영국", "프랑스", "호주", "미국", "캐나다", "독일")}
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+QUOTE_MAX = 700
+
 
 def clean(s):
     return html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
@@ -30,7 +35,32 @@ def search(kw):
     with urllib.request.urlopen(req, timeout=20) as r:
         items = json.load(r)["items"]
     # 네이버뉴스 페이지가 있으면 그 링크, 없으면 언론사 원문
-    return [(clean(i["title"]), i.get("link") or i["originallink"]) for i in items]
+    return [(clean(i["title"]), i.get("link") or i["originallink"], clean(i["description"])) for i in items]
+
+
+def paragraphs(link):
+    """네이버뉴스 본문 문단 목록. 언론사 원문 링크는 형식이 제각각이라 포기하고 빈 목록."""
+    if "n.news.naver.com" not in link:
+        return []
+    try:
+        req = urllib.request.Request(link, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            page = r.read().decode("utf-8", "replace")
+    except Exception:
+        return []
+    m = re.search(r'<article[^>]*id="dic_area"[^>]*>(.*?)</article>', page, re.S)
+    if not m:
+        return []
+    body = re.sub(r"<(script|style)\b.*?</\1>", "", m.group(1), flags=re.S)
+    body = re.sub(r"<br\s*/?>", "\n", body)
+    body = html.unescape(re.sub(r"<[^>]+>", "", body))
+    return [p.strip() for p in body.split("\n") if len(p.strip()) > 30]
+
+
+def quote_for(kw, paras, desc):
+    """키워드가 나오는 첫 문단. 본문을 못 읽으면 검색 결과 요약으로 대체."""
+    hit = next((p for p in paras if kw in p), None) or desc
+    return hit[:QUOTE_MAX] + ("…" if len(hit) > QUOTE_MAX else "")
 
 
 def send(msg):
@@ -48,19 +78,26 @@ def send(msg):
 def main():
     first_run = not SEEN.exists()
     seen = [] if first_run else json.loads(SEEN.read_text())
-    known, new = set(seen), []
+    known, fresh, queue = set(seen), [], []
     for kw in KEYWORDS:
-        for title, link in search(kw):
-            if link not in known:
-                known.add(link)
-                new.append((kw, title, link))
+        for title, link, desc in search(kw):
+            if link in known:
+                continue
+            known.add(link)
+            fresh.append(link)
+            if first_run:
+                continue
+            paras = paragraphs(link)
+            banned = EXCLUDE.get(kw, ())
+            if any(w in title + desc + " ".join(paras) for w in banned):
+                continue  # 제외어 걸림 — seen 에는 남겨 다시 안 보게 한다
+            queue.append((title, link, quote_for(kw, paras, desc)))
 
-    if not first_run:  # 첫 실행은 과거 기사 폭탄 방지용으로 목록만 저장
-        for kw, title, link in reversed(new):  # 오래된 것부터
-            send(f"<b>[{html.escape(kw)}]</b>\n{html.escape(title)}\n{link}")
+    for title, link, quote in reversed(queue):  # 오래된 것부터
+        send(f"{html.escape(title)}\n{link}\n\n<blockquote>{html.escape(quote)}</blockquote>")
 
-    SEEN.write_text(json.dumps(([l for _, _, l in new] + seen)[:KEEP], ensure_ascii=False))
-    print(f"{len(new)}건 {'저장' if first_run else '발송'}")
+    SEEN.write_text(json.dumps((fresh + seen)[:KEEP], ensure_ascii=False))
+    print(f"새 기사 {len(fresh)}건 / " + ("저장만 (첫 실행)" if first_run else f"발송 {len(queue)}건"))
 
 
 def chatid():
@@ -88,6 +125,11 @@ def check():
 
 
 def selftest():
+    paras = ["녹색당 후보가 출마했다" + "x" * 30, "다른 문단" + "y" * 30]
+    assert quote_for("녹색당", paras, "요약") == paras[0]
+    assert quote_for("없는말", paras, "요약") == "요약"
+    assert quote_for("녹색당", [], "요약") == "요약"
+    assert len(quote_for("녹", ["녹" * 900], "")) == QUOTE_MAX + 1
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert clean("따옴표 &quot;테스트&quot; ") == '따옴표 "테스트"'
     print("ok")
