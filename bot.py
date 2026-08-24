@@ -47,6 +47,7 @@ QUOTE_MAX = 700
 # ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
 # 한 번에 이만큼 넘으면 발송을 건너뛰고 기록만 한다 (첫 실행과 같은 처리).
 MAX_BURST = 30
+DIGEST_MAX = 60  # 모아보기 한 구간에 이만큼 넘게 쌓이면 폭탄 방지로 건너뛴다
 # 네이버 뉴스 페이지가 없는 기사는 즉시 보내지 않고 모아뒀다가 3시간마다 묶어서 보낸다.
 KST = timezone(timedelta(hours=9))
 DIGEST_HOURS = 3
@@ -232,10 +233,15 @@ def flush_digest(state, now):
         return state
     if datetime.fromisoformat(last) >= here:
         return state
-    for msg in digest_messages(state["digest"], here):
+    items = state["digest"]
+    if len(items) > DIGEST_MAX:
+        print(f"모아보기 대상 {len(items)}건 — {DIGEST_MAX}건을 넘어 발송을 건너뛰고 기록만 한다.")
+        print("(키워드를 추가했다면 정상. 다음 구간부터 정상 분량만 모인다)")
+        items = []
+    for msg in digest_messages(items, here):
         send(msg, preview=False)
-    if state["digest"]:
-        print(f"모아보기 {len(state['digest'])}건 발송")
+    if items:
+        print(f"모아보기 {len(items)}건 발송")
     state["slot"], state["digest"] = here.isoformat(), []
     return state
 
@@ -351,6 +357,10 @@ def selftest():
     assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
     # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
     assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
+    huge = [["kw", f"제목{i}", f"http://{i}"] for i in range(DIGEST_MAX + 1)]
+    st = flush_digest({"slot": (datetime(2026, 8, 24, 6, 0, tzinfo=KST)).isoformat(), "digest": huge},
+                       datetime(2026, 8, 24, 9, 0, tzinfo=KST))
+    assert st["digest"] == []  # 넘치면 보내지 않고 비우기만 한다
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
@@ -382,6 +392,10 @@ def selftest():
     assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
     # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
     assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
+    huge = [["kw", f"제목{i}", f"http://{i}"] for i in range(DIGEST_MAX + 1)]
+    st = flush_digest({"slot": (datetime(2026, 8, 24, 6, 0, tzinfo=KST)).isoformat(), "digest": huge},
+                       datetime(2026, 8, 24, 9, 0, tzinfo=KST))
+    assert st["digest"] == []  # 넘치면 보내지 않고 비우기만 한다
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
