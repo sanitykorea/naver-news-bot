@@ -13,7 +13,7 @@ jobs:
         with:
           path: |
             seen.json
-            pending.json
+            state.json
           key: seen-${{ github.run_id }}
           restore-keys: seen-
       - run: python3 bot.py

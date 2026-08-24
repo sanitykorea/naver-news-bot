@@ -4,7 +4,7 @@ import html, json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.requ
 from datetime import datetime, timedelta, timezone
 
 HERE = pathlib.Path(__file__).parent
-ENV, SEEN, PENDING = HERE / ".env", HERE / "seen.json", HERE / "pending.json"
+ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
 KEEP = 1000  # ponytail: 파일 하나로 중복 방지. 키워드/발송량 커지면 sqlite로.
 
 if ENV.exists():  # ponytail: python-dotenv 대신 4줄
@@ -39,6 +39,14 @@ MAX_BURST = 30
 KST = timezone(timedelta(hours=9))
 DIGEST_HOURS = 3
 MSG_MAX = 3800  # 텔레그램 한 메시지 4096자 제한 안쪽으로
+
+# 같은 사안을 여러 매체가 받아쓸 때의 우선순위. 앞 묶음일수록 우선.
+PRESS_TIERS = (("경향신문", "한겨레", "프레시안", "오마이뉴스"),
+               ("연합뉴스", "뉴시스", "뉴스1", "연합뉴스TV"))
+# ponytail: 제목 2글자 뭉치의 자카드 유사도로 같은 사안을 묶는다. 실측상
+# 같은 사안 최대 0.61 / 다른 사안 최대 0.06 이라 0.18 이면 넉넉히 갈린다.
+TOPIC_SIM = 0.18
+TOPICS_KEEP = 300
 
 
 def clean(s):
@@ -131,6 +139,39 @@ def format_msg(press, title, link, quote):
     return f"<b>{html.escape(head)}</b>\n\n{block}{link}"
 
 
+def press_rank(press):
+    for i, tier in enumerate(PRESS_TIERS):
+        if press in tier:
+            return i
+    return len(PRESS_TIERS)
+
+
+def shingles(title):
+    t = re.sub(r"[^가-힣A-Za-z0-9]", "", title)
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
+def same_topic(a, b):
+    A, B = shingles(a), shingles(b)
+    return bool(A | B) and len(A & B) / len(A | B) >= TOPIC_SIM
+
+
+def pick_by_press(cands, topics):
+    """(보낼 것, 갱신된 사안 목록). 이미 보낸 사안은 더 우선하는 매체일 때만 다시 보낸다."""
+    topics = [list(t) for t in topics]
+    keep = set()
+    for i in sorted(range(len(cands)), key=lambda i: cands[i][0]):  # 우선 매체부터 판단
+        rank, title = cands[i][0], cands[i][1]
+        hit = next((t for t in topics if same_topic(title, t[0])), None)
+        if hit is None:
+            topics.insert(0, [title, rank])
+            keep.add(i)
+        elif rank < hit[1]:
+            hit[1] = rank
+            keep.add(i)
+    return keep, topics[:TOPICS_KEEP]
+
+
 def slot(now):
     """지금이 속한 3시간 구간의 시작(KST). 0·3·6·9·12·15·18·21시."""
     return now.astimezone(KST).replace(minute=0, second=0, microsecond=0) \
@@ -161,19 +202,21 @@ def digest_messages(items, at):
     return msgs + [cur] if cur else msgs
 
 
-def flush_digest(pending, now):
+def flush_digest(state, now):
     """3시간 구간이 바뀌었으면 모아둔 기사를 보내고 비운다."""
     here = slot(now)
-    last = pending.get("slot")
+    last = state.get("slot")
     if last is None:  # 처음이면 기준만 잡고 다음 구간부터
-        return {"slot": here.isoformat(), "items": pending["items"]}
+        state["slot"] = here.isoformat()
+        return state
     if datetime.fromisoformat(last) >= here:
-        return pending
-    for msg in digest_messages(pending["items"], here):
+        return state
+    for msg in digest_messages(state["digest"], here):
         send(msg, preview=False)
-    if pending["items"]:
-        print(f"모아보기 {len(pending['items'])}건 발송")
-    return {"slot": here.isoformat(), "items": []}
+    if state["digest"]:
+        print(f"모아보기 {len(state['digest'])}건 발송")
+    state["slot"], state["digest"] = here.isoformat(), []
+    return state
 
 
 def send(msg, preview=True):
@@ -198,7 +241,9 @@ def main():
         raise SystemExit("설정 누락: " + ", ".join(missing))
 
     seen = json.loads(SEEN.read_text()) if SEEN.exists() else []
-    pending = json.loads(PENDING.read_text()) if PENDING.exists() else {"items": []}
+    state = json.loads(STATE.read_text()) if STATE.exists() else {}
+    state.setdefault("digest", [])
+    state.setdefault("topics", [])
     first_run = not seen  # 빈 목록도 첫 실행. 있으나 마나 한 파일에 속아 전체를 발송하지 않는다
     known, fresh, queue = set(seen), [], []
     for kw in KEYWORDS:
@@ -212,7 +257,7 @@ def main():
             if "n.news.naver.com" not in link:
                 # 본문을 못 읽으므로 제목과 검색 요약만으로 같은 필터를 건다
                 if not (spurious(kw, title + desc) or excluded(kw, title, [], desc)):
-                    pending["items"].append([kw, title, link])  # 3시간마다 묶어서 발송
+                    state["digest"].append([kw, title, link])  # 3시간마다 묶어서 발송
                 continue
             press, paras = article(link)
             why = ("검색어 오탐" if spurious(kw, title + desc + " ".join(paras))
@@ -220,17 +265,23 @@ def main():
             if why:  # 제외건도 seen 에는 남겨 다시 안 보게 한다
                 print(f"  제외({why}): {title[:40]}")
                 continue
-            queue.append((press, title, link, quote_for(kw, paras)))
+            queue.append((press_rank(press), title, press, link, quote_for(kw, paras)))
+
+    keep, state["topics"] = pick_by_press(queue, state["topics"])
+    for i, (rank, title, *_) in enumerate(queue):
+        if i not in keep:
+            print(f"  중복(같은 사안, 이미 상위 매체 발송): {title[:36]}")
+    queue = [c for i, c in enumerate(queue) if i in keep]
 
     if len(queue) > MAX_BURST:
         print(f"발송 대상 {len(queue)}건 — {MAX_BURST}건을 넘어 발송을 건너뛰고 기록만 한다.")
         print("(키워드를 추가했다면 정상. 다음 실행부터 새 기사만 발송된다)")
         queue = []
-    for press, title, link, quote in reversed(queue):  # 오래된 것부터
+    for _, title, press, link, quote in reversed(queue):  # 오래된 것부터
         send(format_msg(press, title, link, quote))
 
-    pending = flush_digest(pending, datetime.now(KST))
-    PENDING.write_text(json.dumps(pending, ensure_ascii=False))
+    state = flush_digest(state, datetime.now(KST))
+    STATE.write_text(json.dumps(state, ensure_ascii=False))
     SEEN.write_text(json.dumps((fresh + seen)[:KEEP], ensure_ascii=False))
     print(f"새 기사 {len(fresh)}건 / " + ("저장만 (첫 실행)" if first_run else f"발송 {len(queue)}건"))
 
@@ -260,6 +311,19 @@ def check():
 
 
 def selftest():
+    assert press_rank("한겨레") == 0 and press_rank("뉴시스") == 1 and press_rank("더팩트") == 2
+    a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
+    b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
+    c = "군포시, 배리어프리 키오스크 안심택배함 전격 도입"
+    assert same_topic(a, b) and not same_topic(a, c)
+    # 한 실행에 같은 사안 3건: 우선 매체 하나만 나간다
+    keep, tops = pick_by_press([(2, a), (0, b), (1, a)], [])
+    assert keep == {1} and tops[0][1] == 0
+    # 이미 그 외 매체로 나간 사안 → 진보언론이 뒤늦게 나오면 다시 보낸다
+    keep, tops = pick_by_press([(0, b)], [[a, 2]])
+    assert keep == {0} and tops[0][1] == 0
+    # 같은 등급이 또 오면 안 보낸다
+    assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
@@ -275,6 +339,19 @@ def selftest():
     assert spurious("차별금지법", "장애인차별금지법 개정 논의")
     assert not spurious("차별금지법", "장애인차별금지법과 차별금지법은 다르다")
     assert not spurious("차별금지법", "포괄적 차별 금지법 제정 논의")   # 띄어쓰기 허용
+    assert press_rank("한겨레") == 0 and press_rank("뉴시스") == 1 and press_rank("더팩트") == 2
+    a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
+    b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
+    c = "군포시, 배리어프리 키오스크 안심택배함 전격 도입"
+    assert same_topic(a, b) and not same_topic(a, c)
+    # 한 실행에 같은 사안 3건: 우선 매체 하나만 나간다
+    keep, tops = pick_by_press([(2, a), (0, b), (1, a)], [])
+    assert keep == {1} and tops[0][1] == 0
+    # 이미 그 외 매체로 나간 사안 → 진보언론이 뒤늦게 나오면 다시 보낸다
+    keep, tops = pick_by_press([(0, b)], [[a, 2]])
+    assert keep == {0} and tops[0][1] == 0
+    # 같은 등급이 또 오면 안 보낸다
+    assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
