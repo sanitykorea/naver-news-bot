@@ -155,8 +155,8 @@ def main():
                 continue
             known.add(link)
             fresh.append(link)
-            if first_run:
-                continue
+            if first_run or "n.news.naver.com" not in link:
+                continue  # 네이버 뉴스 페이지가 없는 기사는 보내지 않는다
             press, paras = article(link)
             why = ("검색어 오탐" if spurious(kw, title + desc + " ".join(paras))
                    else excluded(kw, title, paras, desc))
