@@ -22,6 +22,9 @@ EXCLUDE = {"녹색당": ("영국", "英", "런던", "잉글랜드", "스코틀�
                      "미국", "美", "워싱턴", "뉴욕", "백악관", "실리콘밸리",
                      "캐나다", "加", "토론토", "밴쿠버", "오타와",
                      "독일", "獨", "베를린", "뮌헨", "함부르크")}
+# ponytail: 검색어가 더 긴 단어에 먹혀 딸려오는 오탐. 그 긴 단어를 지우고도
+# 검색어가 남아야 진짜 관련 기사다. 위치·빈도와 무관하게 매칭 자체를 본다.
+SWALLOWED_BY = {"차별금지법": ("장애인차별금지법",)}
 # ponytail: 위치+빈도 휴리스틱. 제목/리드에 나오면 그 기사의 주제고,
 # 중반 이후 한두 번은 비교 사례라 통과시킨다. 오탐이 잦으면 숫자만 조절할 것.
 LEAD_PARAS = 2      # 리드로 볼 문단 수
@@ -49,6 +52,15 @@ def search(kw):
         items = json.load(r)["items"]
     # 네이버뉴스 페이지가 있으면 그 링크, 없으면 언론사 원문
     return [(clean(i["title"]), i.get("link") or i["originallink"], clean(i["description"])) for i in items]
+
+
+def spurious(kw, text):
+    if kw not in SWALLOWED_BY:
+        return False
+    text = text.replace(" ", "")  # "차별 금지법" 처럼 띄어 쓴 표기도 같게 본다
+    for w in SWALLOWED_BY[kw]:
+        text = text.replace(w, "")
+    return kw not in text
 
 
 def excluded(kw, title, paras, desc=""):
@@ -146,7 +158,8 @@ def main():
             if first_run:
                 continue
             press, paras = article(link)
-            why = excluded(kw, title, paras, desc)
+            why = ("검색어 오탐" if spurious(kw, title + desc + " ".join(paras))
+                   else excluded(kw, title, paras, desc))
             if why:  # 제외건도 seen 에는 남겨 다시 안 보게 한다
                 print(f"  제외({why}): {title[:40]}")
                 continue
@@ -188,6 +201,11 @@ def check():
 
 
 def selftest():
+    assert spurious("차별금지법", "장애인차별금지법 개정 논의")
+    assert not spurious("차별금지법", "장애인차별금지법과 차별금지법은 다르다")
+    assert not spurious("차별금지법", "포괄적 차별 금지법 제정 논의")   # 띄어쓰기 허용
+    assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
+    assert not spurious("성소수자", "성소수자 관련 기사")  # 등록 안 된 키워드는 통과
     assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"
     assert excluded("녹색당", "흉상 성추행 논란", ["파리 명물이 수난이다" + "x" * 30]) == "리드"
     assert excluded("녹색당", "국내 기사", ["국내" * 20] * 3 + ["독일 미국 영국 사례"]) == "본문 3회"

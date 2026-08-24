@@ -21,3 +21,12 @@ jobs:
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
+
+      # ponytail: 5분 주기라 계속 실패하면 계속 온다. 시끄러우면 cron 을 늘리거나 실패 카운트를 캐시에 얹을 것.
+      - if: failure()
+        run: |
+          curl -sS -X POST "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TG_ALERT_CHAT }}" \
+            -d disable_web_page_preview=true \
+            -d text="⚠️ 뉴스봇 실행 실패
+          https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
