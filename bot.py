@@ -3,6 +3,14 @@
 import html, json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 
+# ponytail: 네이버가 이미 연예·스포츠를 별도 도메인으로 분리해뒀다.
+# 그 분류를 그대로 쓴다 — 제목으로 추측하는 것보다 정확하다.
+ENT_SPORTS_DOMAINS = ("entertain.naver.com", "sports.naver.com")
+
+
+def is_ent_sports(link):
+    return urllib.parse.urlparse(link).netloc.endswith(ENT_SPORTS_DOMAINS)
+
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
 KEYWORDS_FILE = HERE / "keywords.txt"
@@ -279,8 +287,8 @@ def main():
                 continue
             known.add(link)
             fresh.append(link)
-            if first_run:
-                continue
+            if first_run or is_ent_sports(link):
+                continue  # 순수 연예·스포츠 기사는 보내지 않는다
             if "n.news.naver.com" not in link:
                 # 본문을 못 읽으므로 제목과 검색 요약만으로 같은 필터를 건다
                 if (on_topic(kw, title + desc) and not spurious(kw, title + desc)
@@ -409,6 +417,9 @@ def selftest():
     assert all(len(x) <= MSG_MAX for x in
                digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
     assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
+    assert is_ent_sports("https://m.entertain.naver.com/article/382/0001289655")
+    assert is_ent_sports("https://m.sports.naver.com/original/article/1")
+    assert not is_ent_sports("https://n.news.naver.com/mnews/article/032/1")
     assert not on_topic("체제전환운동", "3인 체제로 전환하며 새로운 사운드를 고민")
     assert on_topic("체제전환운동", "체제전환운동 관련 성명을 발표했다")
     assert on_topic("체제전환운동", "체제전환\n운동 관련")  # 줄바꿈 등 공백은 무시
