@@ -88,6 +88,13 @@ def spurious(kw, text):
     return kw not in text
 
 
+def on_topic(kw, text):
+    """네이버 검색은 정확한 문구가 아니라 관련도로 매칭한다.
+    검색어(공백 무시)가 실제로 텍스트에 붙어 있는 경우만 진짜 관련 기사로 본다."""
+    norm = lambda t: re.sub(r"\s+", "", t)
+    return norm(kw) in norm(text)
+
+
 def excluded(kw, title, paras, desc=""):
     """제외 사유 문자열, 통과면 None."""
     words = EXCLUDE.get(kw, ())
@@ -270,12 +277,15 @@ def main():
                 continue
             if "n.news.naver.com" not in link:
                 # 본문을 못 읽으므로 제목과 검색 요약만으로 같은 필터를 건다
-                if not (spurious(kw, title + desc) or excluded(kw, title, [], desc)):
+                if (on_topic(kw, title + desc) and not spurious(kw, title + desc)
+                        and not excluded(kw, title, [], desc)):
                     state["digest"].append([kw, title, link])  # 3시간마다 묶어서 발송
                 continue
             press, paras = article(link)
-            why = ("검색어 오탐" if spurious(kw, title + desc + " ".join(paras))
-                   else excluded(kw, title, paras, desc))
+            body_all = title + desc + " ".join(paras)
+            why = ("검색어와 무관" if not on_topic(kw, body_all) else
+                   "검색어 오탐" if spurious(kw, body_all) else
+                   excluded(kw, title, paras, desc))
             if why:  # 제외건도 seen 에는 남겨 다시 안 보게 한다
                 print(f"  제외({why}): {title[:40]}")
                 continue
@@ -385,6 +395,9 @@ def selftest():
     assert all(len(x) <= MSG_MAX for x in
                digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
     assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
+    assert not on_topic("체제전환운동", "3인 체제로 전환하며 새로운 사운드를 고민")
+    assert on_topic("체제전환운동", "체제전환운동 관련 성명을 발표했다")
+    assert on_topic("체제전환운동", "체제전환\n운동 관련")  # 줄바꿈 등 공백은 무시
     assert not spurious("성소수자", "성소수자 관련 기사")  # 등록 안 된 키워드는 통과
     assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"
     assert excluded("녹색당", "흉상 성추행 논란", ["파리 명물이 수난이다" + "x" * 30]) == "리드"
