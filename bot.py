@@ -265,8 +265,13 @@ def digest_messages(items, at):
     return msgs + [cur] if cur else msgs
 
 
+DIGEST_DISABLED = True  # ponytail: 원인 불명 중복발송 조사 중. 이 줄 지우면 재개.
+
+
 def flush_digest(state, now):
-    """3시간 구간이 바뀌었으면 모아둔 기사를 보내고 비운다."""
+    """3시간 구간이 바뀌었으면 모아둔 기사를 보내고 비운다.
+    지금은 DIGEST_DISABLED=True 라서 실제 send()는 절대 호출하지 않는다 —
+    구간 갱신과 digest 비우기만 하고 넘어간다(계속 쌓이기만 하는 것도 막는다)."""
     here = slot(now)
     last = state.get("slot")
     if last is None:  # 처음이면 기준만 잡고 다음 구간부터
@@ -275,6 +280,11 @@ def flush_digest(state, now):
     if datetime.fromisoformat(last) >= here:
         return state
     items = state["digest"]
+    if DIGEST_DISABLED:
+        if items:
+            print(f"모아보기 비활성화 상태 — {len(items)}건 발송하지 않고 버림")
+        state["slot"], state["digest"] = here.isoformat(), []
+        return state
     if len(items) > DIGEST_MAX:
         print(f"모아보기 대상 {len(items)}건 — {DIGEST_MAX}건을 넘어 발송을 건너뛰고 기록만 한다.")
         print("(키워드를 추가했다면 정상. 다음 구간부터 정상 분량만 모인다)")
