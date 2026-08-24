@@ -1,6 +1,6 @@
 name: naver-news-telegram
 on:
-  schedule: [{cron: "2-59/5 * * * *"}]   # 매시 정각·5분 단위를 피해 GitHub 부하가 몰리는 시간대를 비껴간다
+  # schedule 일시 중지 — 반복 발송 원인 조사 중. workflow_dispatch로만 수동 실행 가능.
   workflow_dispatch:
 concurrency: {group: news}            # 실행이 겹쳐 중복 발송되는 것 방지
 jobs:

@@ -67,6 +67,10 @@ GREEN_PARTY_TOPICS = (
 # 중반 이후 한두 번은 비교 사례라 통과시킨다. 오탐이 잦으면 숫자만 조절할 것.
 LEAD_PARAS = 2      # 리드로 볼 문단 수
 MENTION_LIMIT = 3   # 본문 전체에서 이 횟수 이상 나오면 비중이 높다고 본다
+# "英 녹색당 정책 논쟁" 처럼 해외 기사라도 "녹색당" 자체가 2회 이상 나오면
+# (독일 뷘트니스 90/디그뤼넨을 "독일 녹색당"으로 부르는 경우 등) 주요하게 다뤄진 걸로
+# 보고 국가 제외를 무시하고 보낸다. 1회뿐이면 그냥 스쳐가는 언급으로 본다.
+FOREIGN_OVERRIDE_MENTIONS = 2
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 QUOTE_MAX = 700
 # ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
@@ -138,6 +142,8 @@ def excluded(kw, title, paras, desc=""):
     words = EXCLUDE.get(kw, ())
     if not words:
         return None
+    if (title + desc + body).count(kw) >= FOREIGN_OVERRIDE_MENTIONS:
+        return None  # 녹색당 자체가 여러 번 등장 — 해외 기사라도 주요하게 다룬 것으로 본다
     if any(w in title for w in words):
         return "제목"
     if any(w in lead for w in words):
@@ -469,7 +475,8 @@ def selftest():
     assert on_topic("체제전환운동", "체제전환운동 관련 성명을 발표했다")
     assert on_topic("체제전환운동", "체제전환\n운동 관련")  # 줄바꿈 등 공백은 무시
     assert not spurious("성소수자", "성소수자 관련 기사")  # 등록 안 된 키워드는 통과
-    assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"
+    assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"  # 1회뿐 — 그냥 스침
+    assert excluded("녹색당", "英 총선서 녹색당 약진", ["녹색당은 이번 선거에서 의석을 늘렸다" * 2]) is None  # 2회 이상 — 통과
     assert excluded("녹색당", "녹색당 언급, 흉상 성추행 논란", ["파리 명물이 수난이다" + "x" * 30]) == "리드"
     assert excluded("녹색당", "녹색당 언급, 국내 기사", ["국내" * 20] * 3 + ["독일 미국 영국 사례"]) == "본문 3회"
     assert excluded("녹색당", "녹색당 언급, 국내 기사", ["국내" * 20] * 3 + ["독일 사례도 있다"]) is None
