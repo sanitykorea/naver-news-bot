@@ -140,17 +140,19 @@ def slot(now):
 def digest_messages(items, at):
     """키워드별로 묶은 모아보기. 길면 여러 통으로 나눈다."""
     ampm, h12 = ("오전", at.hour) if at.hour < 12 else ("오후", at.hour - 12)
-    lines = [f"📰 <b>({ampm} {h12 or 12}시)의 키워드 뉴스 보기</b>"]
+    lines = [f"📰 <b>{ampm} {h12 or 12}시의 키워드 뉴스 보기</b>"]
     groups = {}
     for kw, title, link in items:
         groups.setdefault(kw, []).append((title, link))
-    for kw, arts in groups.items():
-        lines.append(f"\n<b>{html.escape(kw)}</b>")
+    for arts in groups.values():
+        lines.append("")  # 키워드명은 안 쓰고 빈 줄로만 묶음을 구분한다
         for title, link in arts:
             lines.append(f'• <a href="{html.escape(link, quote=True)}">'
                          f"<b>{html.escape(title)}</b></a>")
     msgs, cur = [], ""
     for ln in lines:
+        if not cur and not ln:
+            continue  # 메시지 첫 줄이 빈 줄이 되지 않게
         if cur and len(cur) + len(ln) + 1 > MSG_MAX:
             msgs.append(cur)
             cur = ln
@@ -264,8 +266,9 @@ def selftest():
     assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
     m = digest_messages([["녹색당", "제목1", "http://a"], ["녹색당", "제목2", "http://b"],
                          ["정의당", "제목3", "http://c"]], at)
-    assert len(m) == 1 and m[0].startswith("📰 <b>(오전 9시)의 키워드 뉴스 보기</b>")
-    assert m[0].count("<b>녹색당</b>") == 1 and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert len(m) == 1 and m[0].startswith("📰 <b>오전 9시의 키워드 뉴스 보기</b>")
+    assert "녹색당" not in m[0] and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert m[0].count("\n\n") == 2  # 묶음 사이 빈 줄
     assert len(digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at)) > 1
     assert all(len(x) <= MSG_MAX for x in
                digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
@@ -278,8 +281,9 @@ def selftest():
     assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
     m = digest_messages([["녹색당", "제목1", "http://a"], ["녹색당", "제목2", "http://b"],
                          ["정의당", "제목3", "http://c"]], at)
-    assert len(m) == 1 and m[0].startswith("📰 <b>(오전 9시)의 키워드 뉴스 보기</b>")
-    assert m[0].count("<b>녹색당</b>") == 1 and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert len(m) == 1 and m[0].startswith("📰 <b>오전 9시의 키워드 뉴스 보기</b>")
+    assert "녹색당" not in m[0] and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert m[0].count("\n\n") == 2  # 묶음 사이 빈 줄
     assert len(digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at)) > 1
     assert all(len(x) <= MSG_MAX for x in
                digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
