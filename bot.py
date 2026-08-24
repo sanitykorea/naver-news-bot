@@ -269,7 +269,7 @@ def digest_messages(items, at):
     return msgs + [cur] if cur else msgs
 
 
-DIGEST_DISABLED = True  # ponytail: 원인 불명 중복발송 조사 중. 이 줄 지우면 재개.
+DIGEST_DISABLED = False  # 빈 메시지 버그(digest_messages 공백 처리) + 시각 불일치 안전장치로 재개
 
 
 def flush_digest(state, now):
