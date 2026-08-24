@@ -292,6 +292,13 @@ def flush_digest(state, now):
     if not items:  # 보낼 게 없으면 헤더만 있는 빈 메시지도 안 보낸다
         state["slot"] = here.isoformat()
         return state
+    # 안전장치: 보내려는 라벨(here)이 "진짜 지금"과 다르면 무슨 정신 나간 상태로
+    # 계산된 값이라는 뜻이니 보내지 않는다. now 인자가 어디서 잘못 꼬였든 여기서 막힌다.
+    fresh = slot(datetime.now(KST))
+    if here != fresh:
+        print(f"모아보기 시각 불일치 — 계산값 {here.isoformat()} / 실제 현재 {fresh.isoformat()}. 발송하지 않는다.")
+        state["slot"], state["digest"] = here.isoformat(), []
+        return state
     if len(items) > DIGEST_MAX:
         print(f"모아보기 대상 {len(items)}건 — {DIGEST_MAX}건을 넘어 발송을 건너뛰고 기록만 한다.")
         print("(키워드를 추가했다면 정상. 다음 구간부터 정상 분량만 모인다)")
