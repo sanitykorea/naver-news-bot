@@ -393,6 +393,10 @@ def main():
     try:
         for _, title, press, link, quote in reversed(queue):  # 오래된 것부터
             send(format_msg(press, title, link, quote))
+        if os.environ.get("FORCE_DIGEST", "").lower() == "true" and state.get("slot"):
+            # 지금 슬롯을 "아직 처리 안 한 것"으로 되돌려서 flush_digest 가 다시 보내게 한다.
+            state["slot"] = (datetime.fromisoformat(state["slot"]) - timedelta(hours=1)).isoformat()
+            print("FORCE_DIGEST — 이번 구간 모아보기를 다시 발송한다")
         state = flush_digest(state, datetime.now(KST))
     finally:
         # 위에서 무슨 일이 있었든(네트워크 오류 등) 여기까지는 항상 실행돼

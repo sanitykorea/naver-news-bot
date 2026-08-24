@@ -2,6 +2,11 @@ name: naver-news-telegram
 on:
   # schedule 일시 중지 — 반복 발송 원인 조사 중. workflow_dispatch로만 수동 실행 가능.
   workflow_dispatch:
+    inputs:
+      force_digest:
+        description: "모아보기 강제 재발송 (현재 슬롯을 다시 flush)"
+        type: boolean
+        default: false
 concurrency: {group: news}            # 실행이 겹쳐 중복 발송되는 것 방지
 jobs:
   run:
@@ -18,6 +23,7 @@ jobs:
           restore-keys: seen-
       - run: python3 bot.py
         env:
+          FORCE_DIGEST: ${{ inputs.force_digest }}
           NAVER_ID: ${{ secrets.NAVER_ID }}
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
