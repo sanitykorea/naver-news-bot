@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """네이버 뉴스 검색(최신순) → 새 기사만 텔레그램 채널로 발송."""
-import html, json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+import html, json, os, pathlib, re, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 
 # ponytail: 네이버가 이미 연예·스포츠를 별도 도메인으로 분리해뒀다.
@@ -46,6 +46,14 @@ EXCLUDE = {"녹색당": ("영국", "英", "런던", "잉글랜드", "스코틀�
 # ponytail: 검색어가 더 긴 단어에 먹혀 딸려오는 오탐. 그 긴 단어를 지우고도
 # 검색어가 남아야 진짜 관련 기사다. 위치·빈도와 무관하게 매칭 자체를 본다.
 SWALLOWED_BY = {"차별금지법": ("장애인차별금지법",)}
+# ponytail: "녹색당"만 언급되고 실제로는 무관한 기사(예: 인물 소개에 이력으로만 등장)를
+# 거른다. 둘 중 하나면 통과 — (1) 당이 행위자로 등장(제목·리드에 언급) (2) 녹색당이
+# 실제로 다루는 정책 영역과 겹침. 둘 다 아니면 이름만 스친 기사로 보고 제외한다.
+GREEN_PARTY_TOPICS = ("기후위기", "기후정의", "탄소중립", "온실가스", "탈핵", "핵발전",
+    "원전", "재생에너지", "생태", "환경", "생물다양성", "동물권", "채식",
+    "노동자", "비정규직", "최저임금", "페미니즘", "성평등", "성소수자", "퀴어",
+    "장애인", "이주민", "난민", "학생인권", "기본소득", "지방분권",
+    "직접민주주의", "주민자치", "협동조합", "먹거리", "반전", "평화")
 # ponytail: 위치+빈도 휴리스틱. 제목/리드에 나오면 그 기사의 주제고,
 # 중반 이후 한두 번은 비교 사례라 통과시킨다. 오탐이 잦으면 숫자만 조절할 것.
 LEAD_PARAS = 2      # 리드로 볼 문단 수
@@ -106,15 +114,24 @@ def on_topic(kw, text):
 
 def excluded(kw, title, paras, desc=""):
     """제외 사유 문자열, 통과면 None."""
+    lead = " ".join(paras[:LEAD_PARAS]) or desc  # 본문을 못 읽으면 검색 요약으로 대신
+    body = " ".join(paras)
+
+    if kw == "녹색당":
+        # 제목에 있으면 명백히 행위자(한국어 표제는 조사를 생략해 "녹색당 약진"처럼 쓴다).
+        # 본문에만 있으면 "녹색당 출신 OOO씨" 처럼 이력 소개일 수 있어 정책 겹침으로만 판단.
+        actor = kw in title
+        on_topic_area = any(w in title + desc + body for w in GREEN_PARTY_TOPICS)
+        if not (actor or on_topic_area):
+            return "접점없음"
+
     words = EXCLUDE.get(kw, ())
     if not words:
         return None
     if any(w in title for w in words):
         return "제목"
-    lead = " ".join(paras[:LEAD_PARAS]) or desc  # 본문을 못 읽으면 검색 요약으로 대신
     if any(w in lead for w in words):
         return "리드"
-    body = " ".join(paras)
     n = sum(body.count(w) for w in words)
     return f"본문 {n}회" if n >= MENTION_LIMIT else None
 
@@ -255,16 +272,31 @@ def flush_digest(state, now):
 
 
 def send(msg, preview=True):
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage",
-        data=json.dumps({"chat_id": os.environ["TG_CHAT"], "text": msg,
-                         "parse_mode": "HTML",
-                         "disable_web_page_preview": not preview}).encode(),
-        headers={"Content-Type": "application/json"})
-    try:
-        urllib.request.urlopen(req, timeout=20).read()
-    except urllib.error.HTTPError as e:  # 텔레그램 에러 사유를 그대로 보여준다
-        raise SystemExit(f"텔레그램 발송 실패 {e.code}: {e.read().decode()}")
+    """실패해도 죽지 않는다 — 여기서 죽으면 그 아래의 상태 저장이 안 돌아서,
+    다음 실행이 같은 항목을 다시 보내려다 또 실패하는 무한 반복에 빠진다.
+    429(과다 요청)는 텔레그램이 알려주는 시간만큼 기다렸다 한 번 재시도한다."""
+    data = json.dumps({"chat_id": os.environ["TG_CHAT"], "text": msg,
+                       "parse_mode": "HTML",
+                       "disable_web_page_preview": not preview}).encode()
+    url = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage"
+    for attempt in range(2):
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}),
+                timeout=20).read()
+            return True
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            if e.code == 429 and attempt == 0:
+                wait = json.loads(body).get("parameters", {}).get("retry_after", 5)
+                time.sleep(min(wait, 30))
+                continue
+            print(f"  텔레그램 발송 실패 {e.code}: {body[:200]}")
+            return False
+        except Exception as e:
+            print(f"  텔레그램 발송 실패(네트워크): {e}")
+            return False
+    return False
 
 
 def main():
@@ -315,12 +347,15 @@ def main():
         print(f"발송 대상 {len(queue)}건 — {MAX_BURST}건을 넘어 발송을 건너뛰고 기록만 한다.")
         print("(키워드를 추가했다면 정상. 다음 실행부터 새 기사만 발송된다)")
         queue = []
-    for _, title, press, link, quote in reversed(queue):  # 오래된 것부터
-        send(format_msg(press, title, link, quote))
-
-    state = flush_digest(state, datetime.now(KST))
-    STATE.write_text(json.dumps(state, ensure_ascii=False))
-    SEEN.write_text(json.dumps((fresh + seen)[:KEEP], ensure_ascii=False))
+    try:
+        for _, title, press, link, quote in reversed(queue):  # 오래된 것부터
+            send(format_msg(press, title, link, quote))
+        state = flush_digest(state, datetime.now(KST))
+    finally:
+        # 위에서 무슨 일이 있었든(네트워크 오류 등) 여기까지는 항상 실행돼
+        # 이미 보낸 것/처리한 것이 다음 실행에서 중복되지 않게 한다.
+        STATE.write_text(json.dumps(state, ensure_ascii=False))
+        SEEN.write_text(json.dumps((fresh + seen)[:KEEP], ensure_ascii=False))
     print(f"새 기사 {len(fresh)}건 / " + ("저장만 (첫 실행)" if first_run else f"발송 {len(queue)}건"))
 
 
@@ -425,11 +460,15 @@ def selftest():
     assert on_topic("체제전환운동", "체제전환\n운동 관련")  # 줄바꿈 등 공백은 무시
     assert not spurious("성소수자", "성소수자 관련 기사")  # 등록 안 된 키워드는 통과
     assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"
-    assert excluded("녹색당", "흉상 성추행 논란", ["파리 명물이 수난이다" + "x" * 30]) == "리드"
-    assert excluded("녹색당", "국내 기사", ["국내" * 20] * 3 + ["독일 미국 영국 사례"]) == "본문 3회"
-    assert excluded("녹색당", "국내 기사", ["국내" * 20] * 3 + ["독일 사례도 있다"]) is None
-    assert excluded("녹색당", "제목", [], "파리 특파원") == "리드"  # 본문 없으면 요약으로
+    assert excluded("녹색당", "녹색당 언급, 흉상 성추행 논란", ["파리 명물이 수난이다" + "x" * 30]) == "리드"
+    assert excluded("녹색당", "녹색당 언급, 국내 기사", ["국내" * 20] * 3 + ["독일 미국 영국 사례"]) == "본문 3회"
+    assert excluded("녹색당", "녹색당 언급, 국내 기사", ["국내" * 20] * 3 + ["독일 사례도 있다"]) is None
+    assert excluded("녹색당", "녹색당 제목", [], "파리 특파원") == "리드"  # 본문 없으면 요약으로
     assert excluded("성소수자", "미국 대법원 판결", []) is None  # 다른 키워드엔 제외어 없음
+    # 녹색당: 행위자로 등장하거나 정책 영역이 겹치면 통과
+    assert excluded("녹색당", "녹색당, 탈핵 촉구 성명 발표", []) is None       # 행위자
+    assert excluded("녹색당", "제목", ["기후위기 대응 시급하다는 지적이 나온다" * 2], "") is None  # 정책 겹침(리드에 없어도)
+    assert excluded("녹색당", "제목", ["녹색당 출신 사업가가 사기 혐의로 기소됐다" * 2], "") == "접점없음"
     paras = ["녹색당 후보가 출마했다" + "x" * 30, "다른 문단" + "y" * 30]
     assert quote_for("녹색당", paras) == paras[0]
     assert quote_for("없는말", paras) == paras[0]      # 못 찾으면 첫 문단
