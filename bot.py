@@ -157,7 +157,9 @@ def same_topic(a, b):
 
 
 def pick_by_press(cands, topics):
-    """(보낼 것, 갱신된 사안 목록). 이미 보낸 사안은 더 우선하는 매체일 때만 다시 보낸다."""
+    """(보낼 것, 갱신된 사안 목록).
+    진보언론(순위 0)은 같은 사안이라도 매번 다시 보낸다.
+    그 외는 이미 보낸 것보다 더 우선하는 매체일 때만 다시 보낸다."""
     topics = [list(t) for t in topics]
     keep = set()
     for i in sorted(range(len(cands)), key=lambda i: cands[i][0]):  # 우선 매체부터 판단
@@ -166,8 +168,8 @@ def pick_by_press(cands, topics):
         if hit is None:
             topics.insert(0, [title, rank])
             keep.add(i)
-        elif rank < hit[1]:
-            hit[1] = rank
+        elif rank == 0 or rank < hit[1]:
+            hit[1] = min(hit[1], rank)
             keep.add(i)
     return keep, topics[:TOPICS_KEEP]
 
@@ -322,8 +324,11 @@ def selftest():
     # 이미 그 외 매체로 나간 사안 → 진보언론이 뒤늦게 나오면 다시 보낸다
     keep, tops = pick_by_press([(0, b)], [[a, 2]])
     assert keep == {0} and tops[0][1] == 0
-    # 같은 등급이 또 오면 안 보낸다
+    # 통신사·그 외는 같은 등급이 또 오면 안 보낸다
     assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
+    assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
+    # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
+    assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
@@ -350,8 +355,11 @@ def selftest():
     # 이미 그 외 매체로 나간 사안 → 진보언론이 뒤늦게 나오면 다시 보낸다
     keep, tops = pick_by_press([(0, b)], [[a, 2]])
     assert keep == {0} and tops[0][1] == 0
-    # 같은 등급이 또 오면 안 보낸다
+    # 통신사·그 외는 같은 등급이 또 오면 안 보낸다
     assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
+    assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
+    # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
+    assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
