@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
+KEYWORDS_FILE = HERE / "keywords.txt"
 KEEP = 1000  # ponytail: 파일 하나로 중복 방지. 키워드/발송량 커지면 sqlite로.
 
 if ENV.exists():  # ponytail: python-dotenv 대신 4줄
@@ -13,7 +14,18 @@ if ENV.exists():  # ponytail: python-dotenv 대신 4줄
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
 
-KEYWORDS = [k.strip() for k in os.environ.get("KEYWORDS", "성소수자").split(",") if k.strip()]
+def load_keywords():
+    # KEYWORDS 환경변수가 있으면 그걸 우선한다(로컬 임시 테스트용).
+    # 평소엔 keywords.txt 를 쓴다 — 저장소에서 바로 고칠 수 있게 비밀값 밖으로 뺀 것.
+    if os.environ.get("KEYWORDS"):
+        return [k.strip() for k in os.environ["KEYWORDS"].split(",") if k.strip()]
+    if KEYWORDS_FILE.exists():
+        return [ln.strip() for ln in KEYWORDS_FILE.read_text().splitlines()
+                if ln.strip() and not ln.startswith("#")]
+    return []
+
+
+KEYWORDS = load_keywords()
 
 # ponytail: 키워드별 제외어. 국가명 + 헤드라인용 한자 약칭 + 주요 도시/지역.
 # 도시까지 넣는 이유: "파리 명물 흉상" 처럼 제목에 국가명이 안 나오는 해외 기사를 잡기 위해.
@@ -238,7 +250,7 @@ def main():
     # 시크릿이 없으면 GitHub 는 빈 문자열을 넘긴다. 조용히 성공하는 대신 여기서 죽는다.
     missing = [k for k in ("NAVER_ID", "NAVER_SECRET", "TG_TOKEN", "TG_CHAT") if not os.environ.get(k)]
     if not KEYWORDS:
-        missing.append("KEYWORDS")
+        missing.append("KEYWORDS (keywords.txt 비어있음)")
     if missing:
         raise SystemExit("설정 누락: " + ", ".join(missing))
 

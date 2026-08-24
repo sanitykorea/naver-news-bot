@@ -32,7 +32,7 @@ cp .env.example .env
    developers.naver.com 키라면 `openapi.naver.com` + `X-Naver-Client-*` 로 바꿔야 한다)
 - `TG_TOKEN`: @BotFather
 - `TG_CHAT`: 숫자 채널 ID. 봇을 채널 관리자로 넣고 아무 글이나 올린 뒤 `python3 bot.py --chatid`
-- `KEYWORDS`: 쉼표로 나열
+- 키워드는 `.env` 가 아니라 `keywords.txt` 에서 관리한다 (한 줄에 하나, `#` 은 주석)
 
 ## 실행
 ```
@@ -59,5 +59,8 @@ python3 bot.py --test     # 필터·인용 로직 자체 점검
 `.github/workflows/news.yml` — 5분마다 실행(GitHub cron 최소 간격, 부하 시 지연될 수 있음).
 상태(`seen.json`)는 커밋 대신 Actions 캐시에 보관한다.
 
-저장소 Settings > Secrets and variables > Actions > Secrets 에 5개 등록:
-`KEYWORDS` `NAVER_ID` `NAVER_SECRET` `TG_TOKEN` `TG_CHAT`
+저장소 Settings > Secrets and variables > Actions > Secrets 에 4개 등록:
+`NAVER_ID` `NAVER_SECRET` `TG_TOKEN` `TG_CHAT`
+
+키워드는 비밀값이 아니므로 Secrets 대신 `keywords.txt` 를 직접 고친다 —
+GitHub 저장소에서 그 파일을 열어 연필 아이콘으로 편집 후 커밋하면 다음 실행부터 바로 반영된다.

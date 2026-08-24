@@ -18,7 +18,6 @@ jobs:
           restore-keys: seen-
       - run: python3 bot.py
         env:
-          KEYWORDS: ${{ secrets.KEYWORDS }}
           NAVER_ID: ${{ secrets.NAVER_ID }}
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
