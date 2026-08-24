@@ -242,7 +242,11 @@ def slot(now):
 
 
 def digest_messages(items, at):
-    """키워드별로 묶은 모아보기. 길면 여러 통으로 나눈다."""
+    """키워드별로 묶은 모아보기. 길면 여러 통으로 나눈다. 항목이 없으면 빈 리스트 —
+    헤더만 있는 빈 메시지를 보내던 버그가 있었다: lines에 헤더 한 줄만 있어도
+    청크 만드는 루프가 그걸 유효한 메시지 하나로 쳐서 반환해버렸다."""
+    if not items:
+        return []
     ampm, h12 = ("오전", at.hour) if at.hour < 12 else ("오후", at.hour - 12)
     lines = [f"📰 <b>{ampm} {h12 or 12}시의 키워드 뉴스 보기</b>"]
     groups = {}
@@ -284,6 +288,9 @@ def flush_digest(state, now):
         if items:
             print(f"모아보기 비활성화 상태 — {len(items)}건 발송하지 않고 버림")
         state["slot"], state["digest"] = here.isoformat(), []
+        return state
+    if not items:  # 보낼 게 없으면 헤더만 있는 빈 메시지도 안 보낸다
+        state["slot"] = here.isoformat()
         return state
     if len(items) > DIGEST_MAX:
         print(f"모아보기 대상 {len(items)}건 — {DIGEST_MAX}건을 넘어 발송을 건너뛰고 기록만 한다.")
