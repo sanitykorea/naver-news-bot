@@ -344,6 +344,9 @@ def main():
                     state["digest"].append([kw, title, link])  # 3시간마다 묶어서 발송
                 continue
             press, paras = article(link)
+            if "경제" in press:  # 매일경제·아시아경제·한국경제 등 경제지 제외
+                print(f"  제외(경제지 {press}): {title[:36]}")
+                continue
             body_all = title + desc + " ".join(paras)
             why = ("검색어와 무관" if not on_topic(kw, body_all) else
                    "검색어 오탐" if spurious(kw, body_all) else
