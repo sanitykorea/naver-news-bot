@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """네이버 뉴스 검색(최신순) → 새 기사만 텔레그램 채널로 발송."""
 import html, json, os, pathlib, re, sys, urllib.error, urllib.parse, urllib.request
+from datetime import datetime, timedelta, timezone
 
 HERE = pathlib.Path(__file__).parent
-ENV, SEEN = HERE / ".env", HERE / "seen.json"
+ENV, SEEN, PENDING = HERE / ".env", HERE / "seen.json", HERE / "pending.json"
 KEEP = 1000  # ponytail: 파일 하나로 중복 방지. 키워드/발송량 커지면 sqlite로.
 
 if ENV.exists():  # ponytail: python-dotenv 대신 4줄
@@ -34,6 +35,10 @@ QUOTE_MAX = 700
 # ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
 # 한 번에 이만큼 넘으면 발송을 건너뛰고 기록만 한다 (첫 실행과 같은 처리).
 MAX_BURST = 30
+# 네이버 뉴스 페이지가 없는 기사는 즉시 보내지 않고 모아뒀다가 3시간마다 묶어서 보낸다.
+KST = timezone(timedelta(hours=9))
+DIGEST_HOURS = 3
+MSG_MAX = 3800  # 텔레그램 한 메시지 4096자 제한 안쪽으로
 
 
 def clean(s):
@@ -126,11 +131,55 @@ def format_msg(press, title, link, quote):
     return f"<b>{html.escape(head)}</b>\n\n{block}{link}"
 
 
-def send(msg):
+def slot(now):
+    """지금이 속한 3시간 구간의 시작(KST). 0·3·6·9·12·15·18·21시."""
+    return now.astimezone(KST).replace(minute=0, second=0, microsecond=0) \
+             - timedelta(hours=now.astimezone(KST).hour % DIGEST_HOURS)
+
+
+def digest_messages(items, at):
+    """키워드별로 묶은 모아보기. 길면 여러 통으로 나눈다."""
+    ampm, h12 = ("오전", at.hour) if at.hour < 12 else ("오후", at.hour - 12)
+    lines = [f"📰 <b>({ampm} {h12 or 12}시)의 키워드 뉴스 보기</b>"]
+    groups = {}
+    for kw, title, link in items:
+        groups.setdefault(kw, []).append((title, link))
+    for kw, arts in groups.items():
+        lines.append(f"\n<b>{html.escape(kw)}</b>")
+        for title, link in arts:
+            lines.append(f'• <a href="{html.escape(link, quote=True)}">'
+                         f"<b>{html.escape(title)}</b></a>")
+    msgs, cur = [], ""
+    for ln in lines:
+        if cur and len(cur) + len(ln) + 1 > MSG_MAX:
+            msgs.append(cur)
+            cur = ln
+        else:
+            cur = f"{cur}\n{ln}" if cur else ln
+    return msgs + [cur] if cur else msgs
+
+
+def flush_digest(pending, now):
+    """3시간 구간이 바뀌었으면 모아둔 기사를 보내고 비운다."""
+    here = slot(now)
+    last = pending.get("slot")
+    if last is None:  # 처음이면 기준만 잡고 다음 구간부터
+        return {"slot": here.isoformat(), "items": pending["items"]}
+    if datetime.fromisoformat(last) >= here:
+        return pending
+    for msg in digest_messages(pending["items"], here):
+        send(msg, preview=False)
+    if pending["items"]:
+        print(f"모아보기 {len(pending['items'])}건 발송")
+    return {"slot": here.isoformat(), "items": []}
+
+
+def send(msg, preview=True):
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage",
         data=json.dumps({"chat_id": os.environ["TG_CHAT"], "text": msg,
-                         "parse_mode": "HTML"}).encode(),
+                         "parse_mode": "HTML",
+                         "disable_web_page_preview": not preview}).encode(),
         headers={"Content-Type": "application/json"})
     try:
         urllib.request.urlopen(req, timeout=20).read()
@@ -147,6 +196,7 @@ def main():
         raise SystemExit("설정 누락: " + ", ".join(missing))
 
     seen = json.loads(SEEN.read_text()) if SEEN.exists() else []
+    pending = json.loads(PENDING.read_text()) if PENDING.exists() else {"items": []}
     first_run = not seen  # 빈 목록도 첫 실행. 있으나 마나 한 파일에 속아 전체를 발송하지 않는다
     known, fresh, queue = set(seen), [], []
     for kw in KEYWORDS:
@@ -155,8 +205,13 @@ def main():
                 continue
             known.add(link)
             fresh.append(link)
-            if first_run or "n.news.naver.com" not in link:
-                continue  # 네이버 뉴스 페이지가 없는 기사는 보내지 않는다
+            if first_run:
+                continue
+            if "n.news.naver.com" not in link:
+                # 본문을 못 읽으므로 제목과 검색 요약만으로 같은 필터를 건다
+                if not (spurious(kw, title + desc) or excluded(kw, title, [], desc)):
+                    pending["items"].append([kw, title, link])  # 3시간마다 묶어서 발송
+                continue
             press, paras = article(link)
             why = ("검색어 오탐" if spurious(kw, title + desc + " ".join(paras))
                    else excluded(kw, title, paras, desc))
@@ -172,6 +227,8 @@ def main():
     for press, title, link, quote in reversed(queue):  # 오래된 것부터
         send(format_msg(press, title, link, quote))
 
+    pending = flush_digest(pending, datetime.now(KST))
+    PENDING.write_text(json.dumps(pending, ensure_ascii=False))
     SEEN.write_text(json.dumps((fresh + seen)[:KEEP], ensure_ascii=False))
     print(f"새 기사 {len(fresh)}건 / " + ("저장만 (첫 실행)" if first_run else f"발송 {len(queue)}건"))
 
@@ -201,9 +258,31 @@ def check():
 
 
 def selftest():
+    at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
+    assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
+    assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
+    assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
+    m = digest_messages([["녹색당", "제목1", "http://a"], ["녹색당", "제목2", "http://b"],
+                         ["정의당", "제목3", "http://c"]], at)
+    assert len(m) == 1 and m[0].startswith("📰 <b>(오전 9시)의 키워드 뉴스 보기</b>")
+    assert m[0].count("<b>녹색당</b>") == 1 and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert len(digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at)) > 1
+    assert all(len(x) <= MSG_MAX for x in
+               digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
     assert spurious("차별금지법", "장애인차별금지법 개정 논의")
     assert not spurious("차별금지법", "장애인차별금지법과 차별금지법은 다르다")
     assert not spurious("차별금지법", "포괄적 차별 금지법 제정 논의")   # 띄어쓰기 허용
+    at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
+    assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
+    assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
+    assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
+    m = digest_messages([["녹색당", "제목1", "http://a"], ["녹색당", "제목2", "http://b"],
+                         ["정의당", "제목3", "http://c"]], at)
+    assert len(m) == 1 and m[0].startswith("📰 <b>(오전 9시)의 키워드 뉴스 보기</b>")
+    assert m[0].count("<b>녹색당</b>") == 1 and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert len(digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at)) > 1
+    assert all(len(x) <= MSG_MAX for x in
+               digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
     assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
     assert not spurious("성소수자", "성소수자 관련 기사")  # 등록 안 된 키워드는 통과
     assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"

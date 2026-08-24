@@ -11,7 +11,9 @@ jobs:
       # ponytail: seen.json 을 커밋하는 대신 캐시로 넘긴다. 5분 주기면 커밋이 월 8천 건.
       - uses: actions/cache@v4
         with:
-          path: seen.json
+          path: |
+            seen.json
+            pending.json
           key: seen-${{ github.run_id }}
           restore-keys: seen-
       - run: python3 bot.py
