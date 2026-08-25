@@ -11,6 +11,20 @@ ENT_SPORTS_DOMAINS = ("entertain.naver.com", "sports.naver.com")
 def is_ent_sports(link):
     return urllib.parse.urlparse(link).netloc.endswith(ENT_SPORTS_DOMAINS)
 
+
+# 언론사명에 "경제"가 없어도 경제지인 곳들
+EXTRA_ECONOMY_PRESS = ("파이낸셜뉴스",)
+# 기업 홍보성 기사(사회공헌·수출 실적 등)에 흔한 제목 어휘 — 어느 키워드든 걸리면 제외
+BUSINESS_NOISE = ("증권", "수출", "수주", "호재", "사회공헌")
+
+
+def is_economy_press(press):
+    return "경제" in press or press in EXTRA_ECONOMY_PRESS
+
+
+def is_business_noise(title):
+    return any(w in title for w in BUSINESS_NOISE)
+
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
 KEYWORDS_FILE = HERE / "keywords.txt"
@@ -361,6 +375,9 @@ def main():
             fresh.append(link)
             if first_run or is_ent_sports(link):
                 continue  # 순수 연예·스포츠 기사는 보내지 않는다
+            if is_business_noise(title):  # 증권·수출·수주·호재·사회공헌 등 기업 홍보성 제목
+                print(f"  제외(기업 홍보성): {title[:40]}")
+                continue
             if "n.news.naver.com" not in link:
                 # 본문을 못 읽으므로 제목과 검색 요약만으로 같은 필터를 건다
                 if (on_topic(kw, title + desc) and not spurious(kw, title + desc)
@@ -368,7 +385,7 @@ def main():
                     state["digest"].append([kw, title, link])  # 3시간마다 묶어서 발송
                 continue
             press, paras = article(link)
-            if "경제" in press:  # 매일경제·아시아경제·한국경제 등 경제지 제외
+            if is_economy_press(press):  # 매일경제·아시아경제·한국경제·파이낸셜뉴스 등 제외
                 print(f"  제외(경제지 {press}): {title[:36]}")
                 continue
             body_all = title + desc + " ".join(paras)
@@ -499,6 +516,11 @@ def selftest():
     assert all(len(x) <= MSG_MAX for x in
                digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
     assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
+    assert is_economy_press("매일경제") and is_economy_press("파이낸셜뉴스")
+    assert not is_economy_press("한겨레")
+    assert is_business_noise("OO기업, 사회공헌활동으로 지역사회 훈훈")
+    assert is_business_noise("반도체 수출 호재에 코스피 껑충")
+    assert not is_business_noise("녹색당 논평 발표")
     assert is_ent_sports("https://m.entertain.naver.com/article/382/0001289655")
     assert is_ent_sports("https://m.sports.naver.com/original/article/1")
     assert not is_ent_sports("https://n.news.naver.com/mnews/article/032/1")
