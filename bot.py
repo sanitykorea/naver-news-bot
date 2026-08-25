@@ -298,8 +298,7 @@ DIGEST_DISABLED = False  # 빈 메시지 버그(digest_messages 공백 처리) +
 
 def flush_digest(state, now):
     """3시간 구간이 바뀌었으면 모아둔 기사를 보내고 비운다.
-    지금은 DIGEST_DISABLED=True 라서 실제 send()는 절대 호출하지 않는다 —
-    구간 갱신과 digest 비우기만 하고 넘어간다(계속 쌓이기만 하는 것도 막는다)."""
+    DIGEST_DISABLED=True 면 구간 갱신과 비우기만 하고 실제 send()는 절대 안 부른다."""
     here = slot(now)
     last = state.get("slot")
     if last is None:  # 처음이면 기준만 잡고 다음 구간부터
@@ -307,7 +306,12 @@ def flush_digest(state, now):
         return state
     if datetime.fromisoformat(last) >= here:
         return state
-    items = state["digest"]
+    # 수집 시점 이후 필터 규칙(BUSINESS_NOISE 등)이 추가됐을 수 있으니 발송 직전 다시 검사한다.
+    # 큐에 오래 머무는 모아보기라 이 재검사가 없으면 규칙 추가 전에 쌓인 재고가 그대로 나간다.
+    items = [i for i in state["digest"] if not is_business_noise(i[1])]
+    dropped = len(state["digest"]) - len(items)
+    if dropped:
+        print(f"모아보기 재검사로 {dropped}건 추가 제외")
     if DIGEST_DISABLED:
         if items:
             print(f"모아보기 비활성화 상태 — {len(items)}건 발송하지 않고 버림")
