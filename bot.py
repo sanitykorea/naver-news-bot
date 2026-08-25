@@ -176,7 +176,11 @@ def excluded(kw, title, paras, desc=""):
 # ponytail: 기사 문단에 늘 따라붙는 군더더기. 문단 앞뒤에 붙은 것만 떼고 본문 중간은 안 건드린다.
 BYLINE = re.compile(r"[\s/·]*[가-힣]{2,5}\s*(?:기자|특파원|객원기자|선임기자|논설위원|PD|앵커)\s*$")
 EMAIL = re.compile(r"\s*[\w.+-]+@[\w.-]+\.\w+\s*$")
-DATELINE = re.compile(r"^\[[^\]]{1,30}\]\s*(?:[가-힣]{2,5}\s*기자\s*=?\s*)?")
+# 대괄호("[서울=뉴시스]")·소괄호("(서울=뉴스1)") 둘 다 쓰인다.
+DATELINE = re.compile(r"^[\[(][^\])]{1,30}[\])]\s*(?:[가-힣]{2,5}\s*기자\s*=?\s*)?")
+# 사진 설명 문단(예: "국가인권위원회. (사진=뉴시스DB) photo@newsis.com *재판매 및 DB 금지").
+# 본문이 아니라 캡션이라 인용 후보에서 아예 뺀다.
+PHOTO_CAPTION = re.compile(r"\(사진\s*=|재판매\s*및\s*DB\s*금지|무단전재")
 
 
 def tidy(para):
@@ -205,7 +209,8 @@ def article(link):
     body = re.sub(r"<(script|style)\b.*?</\1>", "", m.group(1), flags=re.S)
     body = re.sub(r"<br\s*/?>", "\n", body)
     body = html.unescape(re.sub(r"<[^>]+>", "", body))
-    return press, [t for t in (tidy(p) for p in body.split("\n")) if len(t) > 30]
+    return press, [t for t in (tidy(p) for p in body.split("\n"))
+                   if len(t) > 30 and not PHOTO_CAPTION.search(t)]
 
 
 def quote_for(kw, paras):
@@ -569,6 +574,9 @@ def selftest():
     assert tidy("본문이다. hong@news.co.kr") == "본문이다."
     assert tidy("본문이다. 김태연 기자 hong@news.co.kr") == "본문이다."
     assert tidy("김 기자와 만난 자리에서 말했다") == "김 기자와 만난 자리에서 말했다"  # 중간은 안 건드림
+    assert tidy("(서울=뉴스1) 유채연 기자 = 교도소에서...") == "교도소에서..."  # 소괄호 데이트라인
+    assert PHOTO_CAPTION.search("국가인권위원회. (사진=뉴시스DB) photo@newsis.com *재판매 및 DB 금지")
+    assert not PHOTO_CAPTION.search("녹색당은 이날 성명을 내고 정부를 규탄했다")
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
         "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
