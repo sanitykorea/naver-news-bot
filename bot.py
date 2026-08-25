@@ -180,7 +180,10 @@ EMAIL = re.compile(r"\s*[\w.+-]+@[\w.-]+\.\w+\s*$")
 DATELINE = re.compile(r"^[\[(][^\])]{1,30}[\])]\s*(?:[가-힣]{2,5}\s*기자\s*=?\s*)?")
 # 사진 설명 문단(예: "국가인권위원회. (사진=뉴시스DB) photo@newsis.com *재판매 및 DB 금지").
 # 본문이 아니라 캡션이라 인용 후보에서 아예 뺀다.
-PHOTO_CAPTION = re.compile(r"\(사진\s*=|재판매\s*및\s*DB\s*금지|무단전재")
+# "OOO 제공"(사진·자료 출처 표기)으로 끝나는 문단도 캡션이라 뺀다.
+# 명사+제공 처럼 서술어 없이 바로 끝나는 형태만 잡아서 "지원금을 제공했다" 같은
+# 정상 문장은 안 건드린다.
+PHOTO_CAPTION = re.compile(r"\(사진\s*=|재판매\s*및\s*DB\s*금지|무단전재|[가-힣A-Za-z0-9·]{2,20}\s제공\.?$")
 
 
 def tidy(para):
@@ -577,6 +580,9 @@ def selftest():
     assert tidy("(서울=뉴스1) 유채연 기자 = 교도소에서...") == "교도소에서..."  # 소괄호 데이트라인
     assert PHOTO_CAPTION.search("국가인권위원회. (사진=뉴시스DB) photo@newsis.com *재판매 및 DB 금지")
     assert not PHOTO_CAPTION.search("녹색당은 이날 성명을 내고 정부를 규탄했다")
+    assert PHOTO_CAPTION.search("기자회견을 하고 있다. 환경운동연합 제공")
+    assert PHOTO_CAPTION.search("국가인권위원회 제공.")
+    assert not PHOTO_CAPTION.search("정부는 이재민에게 생필품을 제공했다")  # 서술어 있는 정상 문장
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
         "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
