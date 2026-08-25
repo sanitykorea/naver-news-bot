@@ -105,9 +105,10 @@ MSG_MAX = 3800  # 텔레그램 한 메시지 4096자 제한 안쪽으로
 # 같은 사안을 여러 매체가 받아쓸 때의 우선순위. 앞 묶음일수록 우선.
 PRESS_TIERS = (("경향신문", "한겨레", "프레시안", "오마이뉴스"),
                ("연합뉴스", "뉴시스", "뉴스1", "연합뉴스TV"))
-# ponytail: 제목 2글자 뭉치의 자카드 유사도로 같은 사안을 묶는다. 실측상
-# 같은 사안 최대 0.61 / 다른 사안 최대 0.06 이라 0.18 이면 넉넉히 갈린다.
-TOPIC_SIM = 0.18
+# ponytail: 제목 단어 겹침 비율(겹치는 단어수 / 짧은 쪽 단어수)로 같은 사안을 묶는다.
+# 한국어 제목은 어순이 크게 바뀌는 경우가 많아 문자 n-gram보다 단어 단위가 더 잘 갈린다.
+# 실측상 같은 사안 최소 0.11~최대 0.83 / 다른 사안 최대 0.17 이라 0.3 이면 오연결 없이 넉넉하다.
+TOPIC_SIM = 0.3
 TOPICS_KEEP = 300
 
 
@@ -227,14 +228,17 @@ def press_rank(press):
     return len(PRESS_TIERS)
 
 
-def shingles(title):
-    t = re.sub(r"[^가-힣A-Za-z0-9]", "", title)
-    return {t[i:i + 2] for i in range(len(t) - 1)}
+def words(title):
+    return set(re.findall(r"[가-힣A-Za-z0-9]+", title))
 
 
 def same_topic(a, b):
-    A, B = shingles(a), shingles(b)
-    return bool(A | B) and len(A & B) / len(A | B) >= TOPIC_SIM
+    """짧은 쪽 기준 겹치는 단어 비율(포함계수). 어순이 바뀌어도, 한쪽 제목이
+    짧아도 자카드보다 덜 불리하게 잡는다."""
+    A, B = words(a), words(b)
+    if not A or not B:
+        return False
+    return len(A & B) / min(len(A), len(B)) >= TOPIC_SIM
 
 
 def pick_by_press(cands, topics):
