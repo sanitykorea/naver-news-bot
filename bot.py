@@ -397,7 +397,9 @@ def main():
             fresh.append(link)
             if first_run or is_ent_sports(link):
                 continue  # 순수 연예·스포츠 기사는 보내지 않는다
-            if is_business_noise(title):  # 증권·수출·수주·호재·사회공헌 등 기업 홍보성 제목
+            if is_business_noise(title + desc):  # 증권·수출·수주·호재·사회공헌 등 기업 홍보성
+                # "[증시 인사이트] 낙폭 만회..." 처럼 제목엔 안 보여도 네이버 요약에
+                # "수주잔고 성장 기대" 식으로 몰려 있는 경우가 있어 요약도 같이 본다.
                 print(f"  제외(기업 홍보성): {title[:40]}")
                 continue
             if "n.news.naver.com" not in link:
@@ -542,6 +544,8 @@ def selftest():
     assert not is_economy_press("한겨레")
     assert is_business_noise("OO기업, 사회공헌활동으로 지역사회 훈훈")
     assert is_business_noise("반도체 수출 호재에 코스피 껑충")
+    # 제목엔 없고 요약에만 노이즈가 몰린 경우 (실제 사례: [증시 인사이트] 기사)
+    assert is_business_noise("[증시 인사이트] 낙폭 만회하며 상승 전환" + "수주잔고 성장 기대")
     assert not is_business_noise("녹색당 논평 발표")
     assert is_ent_sports("https://m.entertain.naver.com/article/382/0001289655")
     assert is_ent_sports("https://m.sports.naver.com/original/article/1")
