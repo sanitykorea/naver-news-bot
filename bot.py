@@ -32,7 +32,9 @@ def is_business_noise(title):
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
 KEYWORDS_FILE = HERE / "keywords.txt"
-KEEP = 1000  # ponytail: 파일 하나로 중복 방지. 키워드/발송량 커지면 sqlite로.
+KEEP = 20000  # ponytail: 파일 하나로 중복 방지. URL 문자열이라 2만개도 몇 MB 안 된다.
+# 1000이었을 때 5일 전 기사가 밀려나 재노출로 다시 발송된 사례가 있었다.
+# 커지면(수십만 단위) sqlite로.
 
 if ENV.exists():  # ponytail: python-dotenv 대신 4줄
     for line in ENV.read_text().splitlines():
