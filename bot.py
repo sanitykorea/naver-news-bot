@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 # ponytail: 네이버가 이미 연예·스포츠를 별도 도메인으로 분리해뒀다.
 # 그 분류를 그대로 쓴다 — 제목으로 추측하는 것보다 정확하다.
-ENT_SPORTS_DOMAINS = ("entertain.naver.com", "sports.naver.com")
+# 네이버 자체 연예/스포츠 섹션 + 확인될 때마다 추가하는 독립 연예매체.
+# 아이돌 팬덤 뉴스 사이트는 언론사 원문 링크(모아보기 경로)로 들어와서
+# 네이버 도메인 분류가 안 먹히므로 여기 직접 등재한다.
+ENT_SPORTS_DOMAINS = ("entertain.naver.com", "sports.naver.com", "topstarnews.net")
 
 
 def is_ent_sports(link):
