@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """네이버 뉴스 검색(최신순) → 새 기사만 텔레그램 채널로 발송."""
-import html, json, os, pathlib, re, sys, time, urllib.error, urllib.parse, urllib.request
+import html, json, os, pathlib, re, socket, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
+
+# ponytail: GitHub Actions 러너에서 구글 API(Gemini)로 가는 IPv6 경로가 간헐적으로
+# 멈추는 문제가 있다 — 로컬에선 1.7초, GH Actions에선 30초 타임아웃이 매번 났다.
+# IPv4로 강제해서 우회한다. 다른 호출(네이버·텔레그램)엔 영향 없었으니 전역으로 건다.
+_getaddrinfo = socket.getaddrinfo
+def _ipv4_only_getaddrinfo(host, *args, **kwargs):
+    return [ai for ai in _getaddrinfo(host, *args, **kwargs) if ai[0] == socket.AF_INET]
+socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 # ponytail: 네이버가 이미 연예·스포츠를 별도 도메인으로 분리해뒀다.
 # 그 분류를 그대로 쓴다 — 제목으로 추측하는 것보다 정확하다.
