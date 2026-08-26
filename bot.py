@@ -55,10 +55,16 @@ def is_blocked_press(press):
 
 # ponytail: 증권방송 태그("[증시키워드]" 등)는 매번 이름이 달라서 단어 목록으로 끝이 없다.
 # 다른 필터를 다 통과한 소수(하루 수십 건)에만 LLM 질적 판단을 한 번 더 건다.
-# 모델명이 바뀌면 여기만 고치면 된다.
-GEMINI_MODEL = "gemini-flash-lite-latest"  # 자료상 flash 대비 RPM 2배라지만
-# 실측(콘솔)으론 이 계정 flash-lite도 15RPM이었다 — 아래 GEMINI_MIN_INTERVAL 이 진짜 기준
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+# RPM이 모델별로 따로 잡혀서(콘솔에서 확인) 두 모델을 번갈아 쓰면 사실상 한도가 2배가 된다.
+GEMINI_MODELS = ("gemini-flash-lite-latest", "gemini-3.1-flash-lite")
+_model_idx = [0]
+
+
+def _next_model():
+    """호출마다 돌아가며 쓴다. 재시도 때 부르면 자연히 "다른" 모델로 넘어간다."""
+    m = GEMINI_MODELS[_model_idx[0] % len(GEMINI_MODELS)]
+    _model_idx[0] += 1
+    return m
 
 
 def _gemini_says_no(text):
@@ -66,9 +72,9 @@ def _gemini_says_no(text):
     return (word[0].rstrip(".,!?") if word else "") == "NO"
 
 
-# 실제 콘솔에서 이 계정의 flash-lite RPM 한도가 15임을 확인했다(자료상 30이라 2.2초로
-# 뒀었는데 실측 16/15로 이미 넘긴 상태였다). 15RPM=4초 간격, 여유 둬서 4.5초로.
-GEMINI_MIN_INTERVAL = 4.5
+# 모델 하나 기준 실측 RPM 한도는 15 (콘솔 확인, 자료상 30이라던 것과 다름).
+# 두 모델을 번갈아 쓰니 모델당 호출 빈도는 이 값의 절반이라 여유가 있다.
+GEMINI_MIN_INTERVAL = 2.3
 _last_gemini_call = [0.0]
 
 
@@ -93,22 +99,24 @@ def is_relevant(kw, title, desc):
               f"실질 뉴스면 YES, 증권/홍보/행정이벤트성이면 NO 한 단어로만 답해라.")
     body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
                        "generationConfig": {"maxOutputTokens": 5, "temperature": 0}}).encode()
-    req = urllib.request.Request(f"{GEMINI_URL}?key={key}", data=body,
-                                  headers={"Content-Type": "application/json"})
     for attempt in range(2):
+        model = _next_model()  # 재시도 때 호출하면 라운드로빈이라 자연히 다른 모델로 넘어간다
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         _pace_gemini()
         try:
+            req = urllib.request.Request(f"{url}?key={key}", data=body,
+                                          headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=30) as r:  # 15초는 자주 타임아웃됐다
                 data = json.load(r)
             text = data["candidates"][0]["content"]["parts"][0]["text"]
             return not _gemini_says_no(text)
         except Exception as e:
             reason = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
-            if attempt == 0:  # 429든 타임아웃이든 한 번은 쉬었다 재시도
-                print(f"  Gemini 호출 실패({reason}) — 재시도")
+            if attempt == 0:  # 429든 타임아웃이든 한 번은 쉬었다 다른 모델로 재시도
+                print(f"  Gemini 호출 실패({model}, {reason}) — 재시도")
                 time.sleep(5)
                 continue
-            print(f"  Gemini 호출 실패({reason}, 재시도도 실패) — 통과시킴")
+            print(f"  Gemini 호출 실패({model}, {reason}, 재시도도 실패) — 통과시킴")
             return True
     return True
 
@@ -786,6 +794,8 @@ def selftest():
     assert is_business_noise("반도체 수출 호재에 코스피 껑충")
     # 제목엔 없고 요약에만 노이즈가 몰린 경우 (실제 사례: [증시 인사이트] 기사)
     assert is_business_noise("[증시 인사이트] 낙폭 만회하며 상승 전환" + "수주잔고 성장 기대")
+    seq = [_next_model() for _ in range(4)]
+    assert seq == [GEMINI_MODELS[0], GEMINI_MODELS[1], GEMINI_MODELS[0], GEMINI_MODELS[1]]
     assert _gemini_says_no("NO") and _gemini_says_no("no.") and _gemini_says_no(" No ")
     assert not _gemini_says_no("YES") and not _gemini_says_no("") and not _gemini_says_no("NOTABLE")
     assert is_relevant("녹색당", "제목", "요약")  # 키 없으면 무조건 통과(fail-open)
