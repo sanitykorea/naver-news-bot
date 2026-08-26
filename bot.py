@@ -426,6 +426,52 @@ def digest_messages(items, at):
 DIGEST_DISABLED = False  # 빈 메시지 버그(digest_messages 공백 처리) + 시각 불일치 안전장치로 재개
 
 
+# @workers2016 = 민중언론 참세상의 텔레그램 채널. 봇이 그 채널 관리자가 아니라
+# forwardMessage API 를 못 쓰니, 로그인 없는 공개 미리보기 페이지를 긁어서
+# 새 글을 그대로 옮긴다(원본 링크 첨부).
+WORKERS2016_URL = "https://t.me/s/workers2016"
+
+
+def parse_workers2016(page):
+    """[(글번호, 본문)] 오래된 것부터는 아니고 페이지에 나온 순서 그대로."""
+    out = []
+    for b in re.split(r'(?=data-post="workers2016/\d+")', page):
+        m = re.search(r'data-post="workers2016/(\d+)"', b)
+        if not m:
+            continue
+        post_id = int(m.group(1))
+        tm = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', b, re.S)
+        text = ""
+        if tm:
+            t = re.sub(r"<br\s*/?>", "\n", tm.group(1))
+            text = html.unescape(re.sub(r"<[^>]+>", "", t)).strip()
+        out.append((post_id, text))
+    return out
+
+
+def check_workers2016(state):
+    """새 글이 있으면 그대로 전달하고, 마지막으로 본 글 번호를 state 에 남긴다."""
+    try:
+        req = urllib.request.Request(WORKERS2016_URL, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            page = r.read().decode("utf-8", "replace")
+    except Exception as e:
+        print(f"  워커스2016 확인 실패({type(e).__name__}: {e})")
+        return state
+    posts = parse_workers2016(page)
+    last = state.get("workers2016_last", 0)
+    if last == 0:  # 첫 실행은 과거 글 폭탄 방지 — 최신 번호만 기록하고 조용히 넘어간다
+        state["workers2016_last"] = max((i for i, _ in posts), default=0)
+        return state
+    new = sorted((i, t) for i, t in posts if i > last and t)
+    for i, text in new:
+        send(f"{text[:MSG_MAX - 60]}\n\nhttps://t.me/workers2016/{i}")
+        state["workers2016_last"] = i
+    if new:
+        print(f"워커스2016 {len(new)}건 전달")
+    return state
+
+
 def flush_digest(state, now):
     """3시간 구간이 바뀌었으면 모아둔 기사를 보내고 비운다.
     DIGEST_DISABLED=True 면 구간 갱신과 비우기만 하고 실제 send()는 절대 안 부른다."""
@@ -591,6 +637,7 @@ def main():
             state["slot"] = (datetime.fromisoformat(state["slot"]) - timedelta(hours=1)).isoformat()
             print("FORCE_DIGEST — 이번 구간 모아보기를 다시 발송한다")
         state = flush_digest(state, datetime.now(KST))
+        state = check_workers2016(state)
     finally:
         # 위에서 무슨 일이 있었든(네트워크 오류 등) 여기까지는 항상 실행돼
         # 이미 보낸 것/처리한 것이 다음 실행에서 중복되지 않게 한다.
@@ -635,6 +682,13 @@ def selftest():
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
     assert press_rank("민중언론 참세상") == 0
     assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
+    sample = ('<div data-post="workers2016/100">'
+              '<div class="tgme_widget_message_text js-message_text" dir="auto">'
+              '첫 줄<br/>둘째 줄</div></div>'
+              '<div data-post="workers2016/101">'
+              '<div class="tgme_widget_message_photo"></div></div>')  # 텍스트 없는(사진만) 글
+    posts = parse_workers2016(sample)
+    assert posts == [(100, "첫 줄\n둘째 줄"), (101, "")]
     assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
@@ -680,6 +734,13 @@ def selftest():
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
     assert press_rank("민중언론 참세상") == 0
     assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
+    sample = ('<div data-post="workers2016/100">'
+              '<div class="tgme_widget_message_text js-message_text" dir="auto">'
+              '첫 줄<br/>둘째 줄</div></div>'
+              '<div data-post="workers2016/101">'
+              '<div class="tgme_widget_message_photo"></div></div>')  # 텍스트 없는(사진만) 글
+    posts = parse_workers2016(sample)
+    assert posts == [(100, "첫 줄\n둘째 줄"), (101, "")]
     assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
