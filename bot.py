@@ -298,7 +298,10 @@ DATELINE = re.compile(r"^[\[(][^\])]{1,30}[\])]\s*(?:[가-힣]{2,5}\s*기자\s*=
 # 정상 문장은 안 건드린다.
 PHOTO_CAPTION = re.compile(
     r"\(사진\s*=|재판매\s*및\s*DB\s*금지|무단전재|[가-힣A-Za-z0-9·]{2,20}\s제공\.?$"
-    r"|^\s*[▲▶■□●]|©\s*[가-힣A-Za-z0-9/·\s]{2,20}$")
+    r"|^\s*[▲▶■□●]|©\s*[가-힣A-Za-z0-9/·\s]{2,20}$"
+    # 실제 본문 문장엔 이메일 주소가 거의 안 나온다 — "OOO 기자 abc@def.com" 형태가
+    # 캡션 끝이 아니라 중간(뒤에 인용 멘트가 더 붙는 경우 등)에 오면 기존 패턴들을 다 피해간다.
+    r"|[\w.+-]+@[\w.-]+\.\w+")
 
 
 def tidy(para):
@@ -852,6 +855,9 @@ def selftest():
     assert not PHOTO_CAPTION.search("정부는 이재민에게 생필품을 제공했다")  # 서술어 있는 정상 문장
     assert PHOTO_CAPTION.search("▲ 대법원 청사에서 휘날리고 있는 법원기다.© 연합뉴스/권우성")
     assert not PHOTO_CAPTION.search("그는 회의에서 새로운 정책 방향을 제시했다")
+    # 캡션 끝이 아니라 중간에 기자명+이메일이 오고 뒤에 인용멘트가 더 붙는 경우
+    assert PHOTO_CAPTION.search("참석자들이 발언하고 있다. 최원형 기자 circle@hani.co.kr "
+                                 "“지구를 불태우는 폭주를 멈춰라.”")
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
         "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
