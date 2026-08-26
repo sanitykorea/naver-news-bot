@@ -6,10 +6,14 @@ from datetime import datetime, timedelta, timezone
 # ponytail: GitHub Actions 러너에서 구글 API(Gemini)로 가는 IPv6 경로가 간헐적으로
 # 멈추는 문제가 있다 — 로컬에선 1.7초, GH Actions에선 30초 타임아웃이 매번 났다.
 # IPv4로 강제해서 우회한다. 다른 호출(네이버·텔레그램)엔 영향 없었으니 전역으로 건다.
-_getaddrinfo = socket.getaddrinfo
-def _ipv4_only_getaddrinfo(host, *args, **kwargs):
-    return [ai for ai in _getaddrinfo(host, *args, **kwargs) if ai[0] == socket.AF_INET]
-socket.getaddrinfo = _ipv4_only_getaddrinfo
+if not getattr(socket.getaddrinfo, "_ipv4_forced", False):
+    # 이중 패치 방지 — 모듈이 두 번 로드되면(테스트 중 importlib.reload 등) 이미 패치된
+    # getaddrinfo 를 다시 감싸면서 자기 자신을 무한 재귀 호출하게 된다.
+    _real_getaddrinfo = socket.getaddrinfo
+    def _ipv4_only_getaddrinfo(host, *args, **kwargs):
+        return [ai for ai in _real_getaddrinfo(host, *args, **kwargs) if ai[0] == socket.AF_INET]
+    _ipv4_only_getaddrinfo._ipv4_forced = True
+    socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 # ponytail: 네이버가 이미 연예·스포츠를 별도 도메인으로 분리해뒀다.
 # 그 분류를 그대로 쓴다 — 제목으로 추측하는 것보다 정확하다.
@@ -33,8 +37,16 @@ BUSINESS_NOISE = ("증권", "수출", "수주", "호재", "사회공헌", "관�
                   "명칭 공모", "이름 공모", "증시키워드", "증시 인사이트", "증시풍향계")
 
 
+# 완전 차단할 언론사. is_economy_press 와 별개로 성향·신뢰도 문제로 아예 안 받는 곳.
+BLOCKED_PRESS = ("TV조선", "조선일보", "주간조선")
+
+
 def is_economy_press(press):
     return "경제" in press or press in EXTRA_ECONOMY_PRESS
+
+
+def is_blocked_press(press):
+    return any(p in press for p in BLOCKED_PRESS)
 
 
 # ponytail: 증권방송 태그("[증시키워드]" 등)는 매번 이름이 달라서 단어 목록으로 끝이 없다.
@@ -131,6 +143,15 @@ GREEN_PARTY_TOPICS = (
     "폭염", "폭우", "참사", "안전 사각지대",
     "기본소득", "지방분권", "직접민주주의", "주민자치", "협동조합", "먹거리", "반전", "평화",
 )
+# 키워드: (행위자로 인정할 표현들, 정책 영역 겹침으로 봐줄 어휘 — 없으면 제목/리드 등장만 인정).
+# 인권위는 워낙 다양한 사안에 권고를 내서 정책 영역으로 봐줄 만한 좁은 목록이 없다 — 그래서
+# 빈 튜플. "간담회"·"의견수렴" 처럼 관공서 행정 절차 기사에 인권위/인권교육이 곁다리로
+# 나오는 경우, 제목·리드에 직접 없으면 걸러진다.
+RELEVANCE_CHECK = {
+    "녹색당": (("녹색당",), GREEN_PARTY_TOPICS),
+    "국가인권위원회": (("국가인권위원회", "인권위원회", "인권위"), ()),
+    "인권위원회": (("국가인권위원회", "인권위원회", "인권위"), ()),
+}
 # ponytail: 위치+빈도 휴리스틱. 제목/리드에 나오면 그 기사의 주제고,
 # 중반 이후 한두 번은 비교 사례라 통과시킨다. 오탐이 잦으면 숫자만 조절할 것.
 LEAD_PARAS = 2      # 리드로 볼 문단 수
@@ -199,12 +220,15 @@ def excluded(kw, title, paras, desc=""):
     lead = " ".join(paras[:LEAD_PARAS]) or desc  # 본문을 못 읽으면 검색 요약으로 대신
     body = " ".join(paras)
 
-    if kw == "녹색당":
-        # 제목 또는 리드(첫 문단들)에 있으면 행위자로 본다. 예: "충북녹색당 등 이른바
+    if kw in RELEVANCE_CHECK:
+        # 제목 또는 리드(첫 문단들)에 행위자로 등장해야 한다. 예: "충북녹색당 등 이른바
         # '진보 3당'은 기자회견을 열고..." — 제목엔 "진보 3당"이라고만 쓰여도 리드에서
-        # 실제 당사자임이 드러난다. 본문 중간에서만 나오면(이력 소개 등) 정책 겹침으로 판단.
-        actor = kw in title or kw in lead
-        on_topic_area = any(w in title + desc + body for w in GREEN_PARTY_TOPICS)
+        # 실제 당사자임이 드러난다. 본문 중간에서만 나오면(다른 기관과 나열되는 식,
+        # 이력 소개 등) 정책 영역이 겹칠 때만 통과시킨다 — 그런 영역이 없는 키워드는
+        # topics 가 비어 있어서 사실상 제목/리드 등장을 요구하는 걸로 조여진다.
+        aliases, topics = RELEVANCE_CHECK[kw]
+        actor = any(a in title for a in aliases) or any(a in lead for a in aliases)
+        on_topic_area = bool(topics) and any(w in title + desc + body for w in topics)
         if not (actor or on_topic_area):
             return "접점없음"
 
@@ -299,22 +323,37 @@ def same_topic(a, b):
     return len(A & B) / min(len(A), len(B)) >= TOPIC_SIM
 
 
+def register_topic(rank, title, topics):
+    """topics 를 제자리에서 갱신한다(리스트라 호출자에 반영됨). 반환값: 보낼지 여부.
+    진보언론(순위 0)은 같은 사안이라도 매번 통과. 그 외는 이미 기록된 것보다
+    더 우선하는 매체일 때만 통과."""
+    hit = next((t for t in topics if same_topic(title, t[0])), None)
+    if hit is None:
+        topics.insert(0, [title, rank])
+        return True
+    if rank == 0 or rank < hit[1]:
+        hit[1] = min(hit[1], rank)
+        return True
+    return False
+
+
 def pick_by_press(cands, topics):
-    """(보낼 것, 갱신된 사안 목록).
-    진보언론(순위 0)은 같은 사안이라도 매번 다시 보낸다.
-    그 외는 이미 보낸 것보다 더 우선하는 매체일 때만 다시 보낸다."""
+    """(보낼 것, 갱신된 사안 목록)."""
     topics = [list(t) for t in topics]
-    keep = set()
-    for i in sorted(range(len(cands)), key=lambda i: cands[i][0]):  # 우선 매체부터 판단
-        rank, title = cands[i][0], cands[i][1]
-        hit = next((t for t in topics if same_topic(title, t[0])), None)
-        if hit is None:
-            topics.insert(0, [title, rank])
-            keep.add(i)
-        elif rank == 0 or rank < hit[1]:
-            hit[1] = min(hit[1], rank)
-            keep.add(i)
+    keep = {i for i in sorted(range(len(cands)), key=lambda i: cands[i][0])  # 우선 매체부터 판단
+            if register_topic(cands[i][0], cands[i][1], topics)}
     return keep, topics[:TOPICS_KEEP]
+
+
+# 모아보기(언론사 원문 링크)는 어느 매체인지 모른다 — 그 외 매체와 같은 최하위로 취급한다.
+DIGEST_RANK = len(PRESS_TIERS)
+
+
+def dedup_digest(items, topics):
+    """(살아남은 항목들, 갱신된 사안 목록). items 는 [kw, title, link, desc] 리스트."""
+    topics = [list(t) for t in topics]
+    kept = [it for it in items if register_topic(DIGEST_RANK, it[1], topics)]
+    return kept, topics[:TOPICS_KEEP]
 
 
 def slot(now):
@@ -332,7 +371,7 @@ def digest_messages(items, at):
     ampm, h12 = ("오전", at.hour) if at.hour < 12 else ("오후", at.hour - 12)
     lines = [f"📰 <b>{ampm} {h12 or 12}시의 키워드 뉴스 보기</b>"]
     groups = {}
-    for kw, title, link in items:
+    for kw, title, link, desc in items:
         groups.setdefault(kw, []).append((title, link))
     for arts in groups.values():
         lines.append("")  # 키워드명은 안 쓰고 빈 줄로만 묶음을 구분한다
@@ -364,12 +403,16 @@ def flush_digest(state, now):
         return state
     if datetime.fromisoformat(last) >= here:
         return state
-    # 수집 시점 이후 필터 규칙(BUSINESS_NOISE 등)이 추가됐을 수 있으니 발송 직전 다시 검사한다.
-    # 큐에 오래 머무는 모아보기라 이 재검사가 없으면 규칙 추가 전에 쌓인 재고가 그대로 나간다.
-    items = [i for i in state["digest"] if not is_business_noise(i[1])]
+    # 수집 시점 이후 필터 규칙(BUSINESS_NOISE, AI 판단 등)이 추가됐거나 그때는 호출이
+    # 실패했을 수 있으니 발송 직전 다시 검사한다. 큐에 오래(최대 3시간) 머무는
+    # 모아보기라 이 재검사가 없으면 규칙 추가 전에 쌓인 재고가 그대로 나간다.
+    items = [i for i in state["digest"] if not is_business_noise(i[1] + i[3])]
+    items = [i for i in items if is_relevant(i[0], i[1], i[3])]
     dropped = len(state["digest"]) - len(items)
     if dropped:
         print(f"모아보기 재검사로 {dropped}건 추가 제외")
+    # 같은 사안을 여러 매체가 받아쓴 것들을 즉시발송과 같은 사안 목록(state["topics"])으로 묶는다.
+    items, state["topics"] = dedup_digest(items, state["topics"])
     if DIGEST_DISABLED:
         if items:
             print(f"모아보기 비활성화 상태 — {len(items)}건 발송하지 않고 버림")
@@ -437,6 +480,8 @@ def main():
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     state.setdefault("digest", [])
     state.setdefault("topics", [])
+    # 예전 캐시엔 [kw, title, link] 3개짜리 항목이 남아있을 수 있다. desc 없이 마이그레이션.
+    state["digest"] = [d if len(d) == 4 else d + [""] for d in state["digest"]]
     first_run = not seen  # 빈 목록도 첫 실행. 있으나 마나 한 파일에 속아 전체를 발송하지 않는다
     known, fresh, queue = set(seen), [], []
     for kw in KEYWORDS:
@@ -457,11 +502,14 @@ def main():
                 if (on_topic(kw, title + desc) and not spurious(kw, title + desc)
                         and not excluded(kw, title, [], desc)):
                     if is_relevant(kw, title, desc):
-                        state["digest"].append([kw, title, link])  # 3시간마다 묶어서 발송
+                        state["digest"].append([kw, title, link, desc])  # 3시간마다 묶어서 발송
                     else:
                         print(f"  제외(AI 판단): {title[:40]}")
                 continue
             press, paras = article(link)
+            if is_blocked_press(press):  # TV조선·조선일보·주간조선 등 완전 차단
+                print(f"  제외(차단 언론사 {press}): {title[:36]}")
+                continue
             if is_economy_press(press):  # 매일경제·아시아경제·한국경제·파이낸셜뉴스 등 제외
                 print(f"  제외(경제지 {press}): {title[:36]}")
                 continue
@@ -534,6 +582,7 @@ def check():
 
 
 def selftest():
+    os.environ.pop("GEMINI_API_KEY", None)  # 테스트는 진짜 네트워크 호출을 하면 안 된다(quota 낭비)
     assert press_rank("한겨레") == 0 and press_rank("뉴시스") == 1 and press_rank("더팩트") == 2
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
@@ -550,22 +599,28 @@ def selftest():
     assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
     # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
     assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
-    huge = [["kw", f"제목{i}", f"http://{i}"] for i in range(DIGEST_MAX + 1)]
-    st = flush_digest({"slot": (datetime(2026, 8, 24, 6, 0, tzinfo=KST)).isoformat(), "digest": huge},
+    # 모아보기 중복: 같은 사안 두 매체(언론사 원문 링크라 둘 다 최하위 취급)면 하나만 남긴다
+    kept, tops = dedup_digest([["kw", a, "http://1", ""], ["kw", b, "http://2", ""]], [])
+    assert len(kept) == 1 and kept[0][2] == "http://1"
+    kept2, _ = dedup_digest([["kw", c, "http://3", ""]], tops)  # 무관한 기사는 그대로 남는다
+    assert len(kept2) == 1
+    huge = [["kw", f"제목{i}", f"http://{i}", ""] for i in range(DIGEST_MAX + 1)]
+    st = flush_digest({"slot": (datetime(2026, 8, 24, 6, 0, tzinfo=KST)).isoformat(),
+                       "digest": huge, "topics": []},
                        datetime(2026, 8, 24, 9, 0, tzinfo=KST))
     assert st["digest"] == []  # 넘치면 보내지 않고 비우기만 한다
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
-    m = digest_messages([["녹색당", "제목1", "http://a"], ["녹색당", "제목2", "http://b"],
-                         ["정의당", "제목3", "http://c"]], at)
+    m = digest_messages([["녹색당", "제목1", "http://a", ""], ["녹색당", "제목2", "http://b", ""],
+                         ["정의당", "제목3", "http://c", ""]], at)
     assert len(m) == 1 and m[0].startswith("📰 <b>오전 9시의 키워드 뉴스 보기</b>")
     assert "녹색당" not in m[0] and '<a href="http://a"><b>제목1</b></a>' in m[0]
     assert m[0].count("\n\n") == 2  # 묶음 사이 빈 줄
-    assert len(digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at)) > 1
+    assert len(digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at)) > 1
     assert all(len(x) <= MSG_MAX for x in
-               digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
+               digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at))
     assert spurious("차별금지법", "장애인차별금지법 개정 논의")
     assert not spurious("차별금지법", "장애인차별금지법과 차별금지법은 다르다")
     assert not spurious("차별금지법", "포괄적 차별 금지법 제정 논의")   # 띄어쓰기 허용
@@ -585,22 +640,28 @@ def selftest():
     assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
     # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
     assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
-    huge = [["kw", f"제목{i}", f"http://{i}"] for i in range(DIGEST_MAX + 1)]
-    st = flush_digest({"slot": (datetime(2026, 8, 24, 6, 0, tzinfo=KST)).isoformat(), "digest": huge},
+    # 모아보기 중복: 같은 사안 두 매체(언론사 원문 링크라 둘 다 최하위 취급)면 하나만 남긴다
+    kept, tops = dedup_digest([["kw", a, "http://1", ""], ["kw", b, "http://2", ""]], [])
+    assert len(kept) == 1 and kept[0][2] == "http://1"
+    kept2, _ = dedup_digest([["kw", c, "http://3", ""]], tops)  # 무관한 기사는 그대로 남는다
+    assert len(kept2) == 1
+    huge = [["kw", f"제목{i}", f"http://{i}", ""] for i in range(DIGEST_MAX + 1)]
+    st = flush_digest({"slot": (datetime(2026, 8, 24, 6, 0, tzinfo=KST)).isoformat(),
+                       "digest": huge, "topics": []},
                        datetime(2026, 8, 24, 9, 0, tzinfo=KST))
     assert st["digest"] == []  # 넘치면 보내지 않고 비우기만 한다
     at = datetime(2026, 8, 24, 9, 0, tzinfo=KST)
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
-    m = digest_messages([["녹색당", "제목1", "http://a"], ["녹색당", "제목2", "http://b"],
-                         ["정의당", "제목3", "http://c"]], at)
+    m = digest_messages([["녹색당", "제목1", "http://a", ""], ["녹색당", "제목2", "http://b", ""],
+                         ["정의당", "제목3", "http://c", ""]], at)
     assert len(m) == 1 and m[0].startswith("📰 <b>오전 9시의 키워드 뉴스 보기</b>")
     assert "녹색당" not in m[0] and '<a href="http://a"><b>제목1</b></a>' in m[0]
     assert m[0].count("\n\n") == 2  # 묶음 사이 빈 줄
-    assert len(digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at)) > 1
+    assert len(digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at)) > 1
     assert all(len(x) <= MSG_MAX for x in
-               digest_messages([["kw", "제" * 200, f"http://{i}"] for i in range(30)], at))
+               digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at))
     assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
     assert is_economy_press("매일경제") and is_economy_press("파이낸셜뉴스")
     assert not is_economy_press("한겨레")
@@ -610,8 +671,6 @@ def selftest():
     assert is_business_noise("[증시 인사이트] 낙폭 만회하며 상승 전환" + "수주잔고 성장 기대")
     assert _gemini_says_no("NO") and _gemini_says_no("no.") and _gemini_says_no(" No ")
     assert not _gemini_says_no("YES") and not _gemini_says_no("") and not _gemini_says_no("NOTABLE")
-    import os as _os
-    _os.environ.pop("GEMINI_API_KEY", None)
     assert is_relevant("녹색당", "제목", "요약")  # 키 없으면 무조건 통과(fail-open)
     assert not is_business_noise("녹색당 논평 발표")
     assert is_ent_sports("https://m.entertain.naver.com/article/382/0001289655")
@@ -633,6 +692,11 @@ def selftest():
     assert excluded("녹색당", "제목", ["기후위기 대응 시급하다는 지적이 나온다" * 2], "") is None  # 정책 겹침(리드에 없어도)
     # 본문 중간(리드 밖)에서만 스치면 이력 소개로 보고 제외
     assert excluded("녹색당", "제목", ["국내" * 20, "국내" * 20, "녹색당 출신 사업가가 사기 혐의로 기소됐다" * 2], "") == "접점없음"
+    # 인권위: 제목/리드에 없이 본문 중간에 다른 기관과 나열되면 제외 (정책영역 예외 없음)
+    assert excluded("국가인권위원회", "13만 공룡경찰, 외부 독립기구·권한 분산 등 통제 새 판 짜야",
+                     ["국내" * 20, "국내" * 20, "국가인권위원회와 감사원에 통제 기능을 부여해야" * 2]) == "접점없음"
+    assert excluded("국가인권위원회", "인권위 \"경사 이하 조서 작성은 인권침해\"", []) is None  # 제목에 있으면 통과
+    assert excluded("인권위원회", "市, 인권교육 수행기관 간담회", ["관내 인권교육 수탁기관과 간담회를 열었다" * 2]) == "접점없음"
     # 리드에 있으면(당사자로 등장) 행위자로 인정 — "진보 3당" 처럼 제목엔 당명이 안 나올 수 있어서
     assert excluded("녹색당", "진보 3당, 임명 철회 촉구", ["충북녹색당 등 진보 3당은 기자회견을 열었다" * 2], "") is None
     paras = ["녹색당 후보가 출마했다" + "x" * 30, "다른 문단" + "y" * 30]
