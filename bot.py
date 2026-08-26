@@ -32,7 +32,7 @@ def is_economy_press(press):
 # ponytail: 증권방송 태그("[증시키워드]" 등)는 매번 이름이 달라서 단어 목록으로 끝이 없다.
 # 다른 필터를 다 통과한 소수(하루 수십 건)에만 LLM 질적 판단을 한 번 더 건다.
 # 모델명이 바뀌면 여기만 고치면 된다.
-GEMINI_MODEL = "gemini-flash-latest"
+GEMINI_MODEL = "gemini-flash-lite-latest"  # 무료 한도 내 RPM이 flash보다 2배(30 vs 15)
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
