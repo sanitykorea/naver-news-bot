@@ -52,7 +52,8 @@ def is_blocked_press(press):
 # ponytail: 증권방송 태그("[증시키워드]" 등)는 매번 이름이 달라서 단어 목록으로 끝이 없다.
 # 다른 필터를 다 통과한 소수(하루 수십 건)에만 LLM 질적 판단을 한 번 더 건다.
 # 모델명이 바뀌면 여기만 고치면 된다.
-GEMINI_MODEL = "gemini-flash-lite-latest"  # 무료 한도 내 RPM이 flash보다 2배(30 vs 15)
+GEMINI_MODEL = "gemini-flash-lite-latest"  # 자료상 flash 대비 RPM 2배라지만
+# 실측(콘솔)으론 이 계정 flash-lite도 15RPM이었다 — 아래 GEMINI_MIN_INTERVAL 이 진짜 기준
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
@@ -61,9 +62,9 @@ def _gemini_says_no(text):
     return (word[0].rstrip(".,!?") if word else "") == "NO"
 
 
-# 무료 한도가 분당 30회(RPM)라 짧은 시간에 몰아 부르면 하루 총량과 무관하게 429가 난다.
-# 호출 사이 최소 간격을 둬서 페이스를 맞춘다.
-GEMINI_MIN_INTERVAL = 2.2
+# 실제 콘솔에서 이 계정의 flash-lite RPM 한도가 15임을 확인했다(자료상 30이라 2.2초로
+# 뒀었는데 실측 16/15로 이미 넘긴 상태였다). 15RPM=4초 간격, 여유 둬서 4.5초로.
+GEMINI_MIN_INTERVAL = 4.5
 _last_gemini_call = [0.0]
 
 
