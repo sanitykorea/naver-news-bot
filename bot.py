@@ -61,9 +61,22 @@ def _gemini_says_no(text):
     return (word[0].rstrip(".,!?") if word else "") == "NO"
 
 
+# 무료 한도가 분당 30회(RPM)라 짧은 시간에 몰아 부르면 하루 총량과 무관하게 429가 난다.
+# 호출 사이 최소 간격을 둬서 페이스를 맞춘다.
+GEMINI_MIN_INTERVAL = 2.2
+_last_gemini_call = [0.0]
+
+
+def _pace_gemini():
+    wait = GEMINI_MIN_INTERVAL - (time.time() - _last_gemini_call[0])
+    if wait > 0:
+        time.sleep(wait)
+    _last_gemini_call[0] = time.time()
+
+
 def is_relevant(kw, title, desc):
     """API 키가 없거나 호출이 실패하면 통과(발송)시킨다 — AI 장애로 못 보내는 것보단 낫다.
-    명확히 'NO'라고 답할 때만 거른다."""
+    명확히 'NO'라고 답할 때만 거른다. 429(과다요청)는 한 번 쉬었다 재시도한다."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         return True
@@ -76,14 +89,23 @@ def is_relevant(kw, title, desc):
                        "generationConfig": {"maxOutputTokens": 5, "temperature": 0}}).encode()
     req = urllib.request.Request(f"{GEMINI_URL}?key={key}", data=body,
                                   headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:  # 15초는 자주 타임아웃됐다
-            data = json.load(r)
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return not _gemini_says_no(text)
-    except Exception as e:
-        print(f"  Gemini 호출 실패({type(e).__name__}: {e}) — 통과시킴")
-        return True
+    for attempt in range(2):
+        _pace_gemini()
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:  # 15초는 자주 타임아웃됐다
+                data = json.load(r)
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            return not _gemini_says_no(text)
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt == 0:
+                time.sleep(5)
+                continue
+            print(f"  Gemini 호출 실패(HTTP {e.code}) — 통과시킴")
+            return True
+        except Exception as e:
+            print(f"  Gemini 호출 실패({type(e).__name__}: {e}) — 통과시킴")
+            return True
+    return True
 
 
 def is_business_noise(title):
