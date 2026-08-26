@@ -81,7 +81,8 @@ def _pace_gemini():
 
 def is_relevant(kw, title, desc):
     """API 키가 없거나 호출이 실패하면 통과(발송)시킨다 — AI 장애로 못 보내는 것보단 낫다.
-    명확히 'NO'라고 답할 때만 거른다. 429(과다요청)는 한 번 쉬었다 재시도한다."""
+    명확히 'NO'라고 답할 때만 거른다. 무슨 에러든(429·타임아웃 등) 한 번은 쉬었다 재시도한다 —
+    타임아웃은 재시도 없이 바로 포기하던 버그가 있었다."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         return True
@@ -101,14 +102,13 @@ def is_relevant(kw, title, desc):
                 data = json.load(r)
             text = data["candidates"][0]["content"]["parts"][0]["text"]
             return not _gemini_says_no(text)
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt == 0:
+        except Exception as e:
+            reason = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
+            if attempt == 0:  # 429든 타임아웃이든 한 번은 쉬었다 재시도
+                print(f"  Gemini 호출 실패({reason}) — 재시도")
                 time.sleep(5)
                 continue
-            print(f"  Gemini 호출 실패(HTTP {e.code}) — 통과시킴")
-            return True
-        except Exception as e:
-            print(f"  Gemini 호출 실패({type(e).__name__}: {e}) — 통과시킴")
+            print(f"  Gemini 호출 실패({reason}, 재시도도 실패) — 통과시킴")
             return True
     return True
 
