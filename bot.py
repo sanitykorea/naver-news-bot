@@ -173,7 +173,13 @@ RELEVANCE_CHECK = {
     "녹색당": (("녹색당",), GREEN_PARTY_TOPICS),
     "국가인권위원회": (("국가인권위원회", "인권위원회", "인권위"), ()),
     "인권위원회": (("국가인권위원회", "인권위원회", "인권위"), ()),
+    # "국회 본회의, 36건 법안·결의안 처리"처럼 여러 법안 중 하나로 스치거나,
+    # "OO시 기후환경학교 개강" 같은 행정 홍보에 곁다리로 걸리는 사례가 많았다.
+    "탄소중립법": (("탄소중립법", "탄소중립기본법"), ()),
 }
+# 흔한 한 단어라 아무 기사에나 걸린다 — 진보언론(PRESS_TIERS[0])에서 나온 것만 받는다.
+# 언론사를 모르는 원문 링크(모아보기 경로)는 이 키워드에 한해 아예 보내지 않는다.
+PROGRESSIVE_ONLY_KEYWORDS = ("기후", "환경", "인권", "노동")
 # ponytail: 위치+빈도 휴리스틱. 제목/리드에 나오면 그 기사의 주제고,
 # 중반 이후 한두 번은 비교 사례라 통과시킨다. 오탐이 잦으면 숫자만 조절할 것.
 LEAD_PARAS = 2      # 리드로 볼 문단 수
@@ -194,7 +200,7 @@ DIGEST_HOURS = 3
 MSG_MAX = 3800  # 텔레그램 한 메시지 4096자 제한 안쪽으로
 
 # 같은 사안을 여러 매체가 받아쓸 때의 우선순위. 앞 묶음일수록 우선.
-PRESS_TIERS = (("경향신문", "한겨레", "프레시안", "오마이뉴스"),
+PRESS_TIERS = (("경향신문", "한겨레", "프레시안", "오마이뉴스", "MBC", "JTBC"),
                ("연합뉴스", "뉴시스", "뉴스1", "연합뉴스TV"))
 # ponytail: 제목 단어 겹침 비율(겹치는 단어수 / 짧은 쪽 단어수)로 같은 사안을 묶는다.
 # 한국어 제목은 어순이 크게 바뀌는 경우가 많아 문자 n-gram보다 단어 단위가 더 잘 갈린다.
@@ -520,6 +526,10 @@ def main():
                 print(f"  제외(기업 홍보성): {title[:40]}")
                 continue
             if "n.news.naver.com" not in link:
+                if kw in PROGRESSIVE_ONLY_KEYWORDS:
+                    # 언론사 원문 링크는 어느 매체인지 알 수 없어 진보언론 여부를
+                    # 확인 못 한다 — 이 키워드들은 그냥 보내지 않는다.
+                    continue
                 # 본문을 못 읽으므로 제목과 검색 요약만으로 같은 필터를 건다
                 if (on_topic(kw, title + desc) and not spurious(kw, title + desc)
                         and not excluded(kw, title, [], desc)):
@@ -531,6 +541,11 @@ def main():
             press, paras = article(link)
             if is_blocked_press(press):  # TV조선·조선일보·주간조선 등 완전 차단
                 print(f"  제외(차단 언론사 {press}): {title[:36]}")
+                continue
+            if kw in PROGRESSIVE_ONLY_KEYWORDS and press not in PRESS_TIERS[0]:
+                # "기후"·"환경"·"인권"·"노동"처럼 너무 흔한 단어라 언론사 상관없이
+                # 걸면 노이즈가 폭증한다 — 진보언론에서 나온 것만 받는다.
+                print(f"  제외(진보언론 아님 {press}): {title[:36]}")
                 continue
             if is_economy_press(press):  # 매일경제·아시아경제·한국경제·파이낸셜뉴스 등 제외
                 print(f"  제외(경제지 {press}): {title[:36]}")
@@ -606,6 +621,8 @@ def check():
 def selftest():
     os.environ.pop("GEMINI_API_KEY", None)  # 테스트는 진짜 네트워크 호출을 하면 안 된다(quota 낭비)
     assert press_rank("한겨레") == 0 and press_rank("뉴시스") == 1 and press_rank("더팩트") == 2
+    assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
+    assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
     c = "군포시, 배리어프리 키오스크 안심택배함 전격 도입"
@@ -647,6 +664,8 @@ def selftest():
     assert not spurious("차별금지법", "장애인차별금지법과 차별금지법은 다르다")
     assert not spurious("차별금지법", "포괄적 차별 금지법 제정 논의")   # 띄어쓰기 허용
     assert press_rank("한겨레") == 0 and press_rank("뉴시스") == 1 and press_rank("더팩트") == 2
+    assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
+    assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
     c = "군포시, 배리어프리 키오스크 안심택배함 전격 도입"
@@ -719,6 +738,11 @@ def selftest():
                      ["국내" * 20, "국내" * 20, "국가인권위원회와 감사원에 통제 기능을 부여해야" * 2]) == "접점없음"
     assert excluded("국가인권위원회", "인권위 \"경사 이하 조서 작성은 인권침해\"", []) is None  # 제목에 있으면 통과
     assert excluded("인권위원회", "市, 인권교육 수행기관 간담회", ["관내 인권교육 수탁기관과 간담회를 열었다" * 2]) == "접점없음"
+    assert excluded("탄소중립법", "탄소중립법 국회 통과…환경단체 반발", []) is None  # 제목에 직접 등장
+    assert excluded("탄소중립법", "고양시, 기후환경학교 개강",
+                     ["시민 스스로 생활 속 실천 문화를 만들어간다" * 20,
+                      "이를 통해 지속 가능한 환경교육도시로 발전시켜 나간다는 방침이다" * 2,
+                      "탄소중립법 취지에 맞춰 향후 조례도 정비할 계획이다" * 2]) == "접점없음"
     # 리드에 있으면(당사자로 등장) 행위자로 인정 — "진보 3당" 처럼 제목엔 당명이 안 나올 수 있어서
     assert excluded("녹색당", "진보 3당, 임명 철회 촉구", ["충북녹색당 등 진보 3당은 기자회견을 열었다" * 2], "") is None
     paras = ["녹색당 후보가 출마했다" + "x" * 30, "다른 문단" + "y" * 30]
