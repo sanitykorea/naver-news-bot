@@ -29,6 +29,43 @@ def is_economy_press(press):
     return "경제" in press or press in EXTRA_ECONOMY_PRESS
 
 
+# ponytail: 증권방송 태그("[증시키워드]" 등)는 매번 이름이 달라서 단어 목록으로 끝이 없다.
+# 다른 필터를 다 통과한 소수(하루 수십 건)에만 LLM 질적 판단을 한 번 더 건다.
+# 모델명이 바뀌면 여기만 고치면 된다.
+GEMINI_MODEL = "gemini-flash-latest"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+
+def _gemini_says_no(text):
+    word = text.strip().upper().split()[:1]
+    return (word[0].rstrip(".,!?") if word else "") == "NO"
+
+
+def is_relevant(kw, title, desc):
+    """API 키가 없거나 호출이 실패하면 통과(발송)시킨다 — AI 장애로 못 보내는 것보단 낫다.
+    명확히 'NO'라고 답할 때만 거른다."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        return True
+    prompt = (f"다음은 '{kw}' 키워드로 검색된 뉴스 기사다. 진보정당·시민사회 뉴스클리핑 채널에 "
+              f"보낼 만한 시민사회·정치·인권·환경 관련 실질 뉴스인가, 아니면 증권시황·기업홍보·"
+              f"행정 이벤트성(사회공헌, 명칭공모 등) 기사인가?\n\n"
+              f"제목: {title}\n요약: {desc}\n\n"
+              f"실질 뉴스면 YES, 증권/홍보/행정이벤트성이면 NO 한 단어로만 답해라.")
+    body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
+                       "generationConfig": {"maxOutputTokens": 5, "temperature": 0}}).encode()
+    req = urllib.request.Request(f"{GEMINI_URL}?key={key}", data=body,
+                                  headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.load(r)
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return not _gemini_says_no(text)
+    except Exception as e:
+        print(f"  Gemini 호출 실패({type(e).__name__}: {e}) — 통과시킴")
+        return True
+
+
 def is_business_noise(title):
     return any(w in title for w in BUSINESS_NOISE)
 
@@ -409,7 +446,10 @@ def main():
                 # 본문을 못 읽으므로 제목과 검색 요약만으로 같은 필터를 건다
                 if (on_topic(kw, title + desc) and not spurious(kw, title + desc)
                         and not excluded(kw, title, [], desc)):
-                    state["digest"].append([kw, title, link])  # 3시간마다 묶어서 발송
+                    if is_relevant(kw, title, desc):
+                        state["digest"].append([kw, title, link])  # 3시간마다 묶어서 발송
+                    else:
+                        print(f"  제외(AI 판단): {title[:40]}")
                 continue
             press, paras = article(link)
             if is_economy_press(press):  # 매일경제·아시아경제·한국경제·파이낸셜뉴스 등 제외
@@ -421,6 +461,9 @@ def main():
                    excluded(kw, title, paras, desc))
             if why:  # 제외건도 seen 에는 남겨 다시 안 보게 한다
                 print(f"  제외({why}): {title[:40]}")
+                continue
+            if not is_relevant(kw, title, desc):
+                print(f"  제외(AI 판단): {title[:40]}")
                 continue
             queue.append((press_rank(press), title, press, link, quote_for(kw, paras)))
 
@@ -465,13 +508,19 @@ def chatid():
 
 def check():
     """키 값은 출력하지 않고 형태와 인증만 점검."""
-    for k in ("NAVER_ID", "NAVER_SECRET", "TG_TOKEN", "TG_CHAT"):
+    for k in ("NAVER_ID", "NAVER_SECRET", "TG_TOKEN", "TG_CHAT", "GEMINI_API_KEY"):
         v = os.environ.get(k)
         print(f"{k}: {'없음' if v is None else str(len(v)) + '자'}")
     try:
         print("네이버 검색 API:", len(search("테스트")), "건 — 정상")
     except urllib.error.HTTPError as e:
         print("네이버 검색 API 실패:", e.code, e.read().decode()[:150])
+    if os.environ.get("GEMINI_API_KEY"):
+        print("Gemini API 호출 시도 —", end=" ")
+        is_relevant("테스트", "정부, 예산안 국회 통과시켜", "여야가 합의해 예산안을 처리했다")
+        print("바로 위에 '호출 실패' 로그가 없으면 인증 정상")
+    else:
+        print("Gemini API: 키 없음 — 질적 필터 없이 기존 규칙으로만 동작")
 
 
 def selftest():
@@ -549,6 +598,11 @@ def selftest():
     assert is_business_noise("반도체 수출 호재에 코스피 껑충")
     # 제목엔 없고 요약에만 노이즈가 몰린 경우 (실제 사례: [증시 인사이트] 기사)
     assert is_business_noise("[증시 인사이트] 낙폭 만회하며 상승 전환" + "수주잔고 성장 기대")
+    assert _gemini_says_no("NO") and _gemini_says_no("no.") and _gemini_says_no(" No ")
+    assert not _gemini_says_no("YES") and not _gemini_says_no("") and not _gemini_says_no("NOTABLE")
+    import os as _os
+    _os.environ.pop("GEMINI_API_KEY", None)
+    assert is_relevant("녹색당", "제목", "요약")  # 키 없으면 무조건 통과(fail-open)
     assert not is_business_noise("녹색당 논평 발표")
     assert is_ent_sports("https://m.entertain.naver.com/article/382/0001289655")
     assert is_ent_sports("https://m.sports.naver.com/original/article/1")

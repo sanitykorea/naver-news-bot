@@ -24,6 +24,7 @@ jobs:
       - run: python3 bot.py
         env:
           FORCE_DIGEST: ${{ inputs.force_digest }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           NAVER_ID: ${{ secrets.NAVER_ID }}
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
