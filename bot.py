@@ -40,6 +40,10 @@ BUSINESS_NOISE = ("증권", "수출", "수주", "호재", "사회공헌", "관�
 # 완전 차단할 언론사. is_economy_press 와 별개로 성향·신뢰도 문제로 아예 안 받는 곳.
 BLOCKED_PRESS = ("TV조선", "조선일보", "주간조선")
 
+# 네이버에 안 실려 article() 로 언론사를 못 읽는 매체를 도메인으로 직접 등록한다.
+# 즉시발송 대상이 되고(3시간 모아보기로 안 밀림) PRESS_TIERS[0] 에도 넣어 우선순위를 준다.
+TRUSTED_DOMAINS = {"newscham.net": "민중언론 참세상"}
+
 
 def is_economy_press(press):
     return "경제" in press or press in EXTRA_ECONOMY_PRESS
@@ -201,7 +205,7 @@ DIGEST_HOURS = 3
 MSG_MAX = 3800  # 텔레그램 한 메시지 4096자 제한 안쪽으로
 
 # 같은 사안을 여러 매체가 받아쓸 때의 우선순위. 앞 묶음일수록 우선.
-PRESS_TIERS = (("경향신문", "한겨레", "프레시안", "오마이뉴스", "MBC", "JTBC"),
+PRESS_TIERS = (("경향신문", "한겨레", "프레시안", "오마이뉴스", "MBC", "JTBC", "민중언론 참세상"),
                ("연합뉴스", "뉴시스", "뉴스1", "연합뉴스TV"))
 # ponytail: 제목 단어 겹침 비율(겹치는 단어수 / 짧은 쪽 단어수)로 같은 사안을 묶는다.
 # 한국어 제목은 어순이 크게 바뀌는 경우가 많아 문자 n-gram보다 단어 단위가 더 잘 갈린다.
@@ -526,7 +530,9 @@ def main():
                 # "수주잔고 성장 기대" 식으로 몰려 있는 경우가 있어 요약도 같이 본다.
                 print(f"  제외(기업 홍보성): {title[:40]}")
                 continue
-            if "n.news.naver.com" not in link:
+            trusted_press = next((p for d, p in TRUSTED_DOMAINS.items()
+                                  if urllib.parse.urlparse(link).netloc.endswith(d)), None)
+            if "n.news.naver.com" not in link and not trusted_press:
                 if kw in PROGRESSIVE_ONLY_KEYWORDS:
                     # 언론사 원문 링크는 어느 매체인지 알 수 없어 진보언론 여부를
                     # 확인 못 한다 — 이 키워드들은 그냥 보내지 않는다.
@@ -539,7 +545,11 @@ def main():
                     else:
                         print(f"  제외(AI 판단): {title[:40]}")
                 continue
-            press, paras = article(link)
+            if trusted_press:
+                # 참세상 등은 네이버에 안 실려 본문을 못 읽는다 — 인용구 없이 즉시 보낸다.
+                press, paras = trusted_press, []
+            else:
+                press, paras = article(link)
             if is_blocked_press(press):  # TV조선·조선일보·주간조선 등 완전 차단
                 print(f"  제외(차단 언론사 {press}): {title[:36]}")
                 continue
@@ -623,6 +633,8 @@ def selftest():
     os.environ.pop("GEMINI_API_KEY", None)  # 테스트는 진짜 네트워크 호출을 하면 안 된다(quota 낭비)
     assert press_rank("한겨레") == 0 and press_rank("뉴시스") == 1 and press_rank("더팩트") == 2
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
+    assert press_rank("민중언론 참세상") == 0
+    assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
     assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
@@ -666,6 +678,8 @@ def selftest():
     assert not spurious("차별금지법", "포괄적 차별 금지법 제정 논의")   # 띄어쓰기 허용
     assert press_rank("한겨레") == 0 and press_rank("뉴시스") == 1 and press_rank("더팩트") == 2
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
+    assert press_rank("민중언론 참세상") == 0
+    assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
     assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
