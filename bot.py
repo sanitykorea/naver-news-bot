@@ -57,7 +57,7 @@ def is_relevant(kw, title, desc):
     req = urllib.request.Request(f"{GEMINI_URL}?key={key}", data=body,
                                   headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=30) as r:  # 15초는 자주 타임아웃됐다
             data = json.load(r)
         text = data["candidates"][0]["content"]["parts"][0]["text"]
         return not _gemini_says_no(text)
