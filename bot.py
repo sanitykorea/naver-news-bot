@@ -477,25 +477,43 @@ DIGEST_DISABLED = False  # 빈 메시지 버그(digest_messages 공백 처리) +
 WORKERS2016_URL = "https://t.me/s/workers2016"
 
 
+def _clean_tag(t, keep_breaks=False):
+    if keep_breaks:
+        t = re.sub(r"<br\s*/?>", "\n", t)
+    return html.unescape(re.sub(r"<[^>]+>", "", t)).strip()
+
+
 def parse_workers2016(page):
-    """[(글번호, 본문)] 오래된 것부터는 아니고 페이지에 나온 순서 그대로."""
+    """[(글번호, 제목, 원문 링크, 본문)]. 대개 "URL<br><b>제목</b><br><br>본문" 형태다.
+    URL이 없으면(직접 쓴 글 등) 채널 글 링크로, 제목을 못 가르면 본문 첫 줄로 대신한다."""
     out = []
     for b in re.split(r'(?=data-post="workers2016/\d+")', page):
         m = re.search(r'data-post="workers2016/(\d+)"', b)
         if not m:
             continue
         post_id = int(m.group(1))
+        post_url = f"https://t.me/workers2016/{post_id}"
         tm = re.search(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', b, re.S)
-        text = ""
-        if tm:
-            t = re.sub(r"<br\s*/?>", "\n", tm.group(1))
-            text = html.unescape(re.sub(r"<[^>]+>", "", t)).strip()
-        out.append((post_id, text))
+        if not tm:
+            out.append((post_id, "", post_url, ""))
+            continue
+        content = tm.group(1)
+        lm = re.match(r'\s*<a href="([^"]+)"[^>]*>[^<]*</a>\s*<br\s*/?>\s*(.*)', content, re.S)
+        link, rest = (lm.group(1), lm.group(2)) if lm else (post_url, content)
+        tm2 = re.match(r'\s*<b>(.*?)</b>\s*<br\s*/?>\s*<br\s*/?>\s*(.*)', rest, re.S)
+        if tm2:
+            title, body = _clean_tag(tm2.group(1)), _clean_tag(tm2.group(2), keep_breaks=True)
+        else:  # 제목/본문을 못 가르면 첫 줄을 제목으로
+            full = _clean_tag(rest, keep_breaks=True)
+            title, _, body = full.partition("\n")
+            body = body.strip()
+        out.append((post_id, title, link, body))
     return out
 
 
 def check_workers2016(state):
-    """새 글이 있으면 그대로 전달하고, 마지막으로 본 글 번호를 state 에 남긴다."""
+    """새 글이 있으면 하우스 스타일(제목 볼드+하이퍼링크, 본문 인용구)로 전달하고,
+    마지막으로 본 글 번호를 state 에 남긴다. 채널 글 자체 링크(t.me/...)는 보내지 않는다."""
     try:
         req = urllib.request.Request(WORKERS2016_URL, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -506,11 +524,11 @@ def check_workers2016(state):
     posts = parse_workers2016(page)
     last = state.get("workers2016_last", 0)
     if last == 0:  # 첫 실행은 과거 글 폭탄 방지 — 최신 번호만 기록하고 조용히 넘어간다
-        state["workers2016_last"] = max((i for i, _ in posts), default=0)
+        state["workers2016_last"] = max((i for i, _, _, _ in posts), default=0)
         return state
-    new = sorted((i, t) for i, t in posts if i > last and t)
-    for i, text in new:
-        send(f"{text[:MSG_MAX - 60]}\n\nhttps://t.me/workers2016/{i}")
+    new = sorted((i, t, l, b) for i, t, l, b in posts if i > last and (t or b))
+    for i, title, link, body in new:
+        send(format_msg("참세상", title, link, shorten_quote("참세상", body)))
         state["workers2016_last"] = i
     if new:
         print(f"워커스2016 {len(new)}건 전달")
@@ -733,13 +751,22 @@ def selftest():
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
     assert press_rank("민중언론 참세상") == 0
     assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
-    sample = ('<div data-post="workers2016/100">'
-              '<div class="tgme_widget_message_text js-message_text" dir="auto">'
-              '첫 줄<br/>둘째 줄</div></div>'
-              '<div data-post="workers2016/101">'
-              '<div class="tgme_widget_message_photo"></div></div>')  # 텍스트 없는(사진만) 글
+    sample = (
+        '<div data-post="workers2016/100">'
+        '<div class="tgme_widget_message_text js-message_text" dir="auto">'
+        '<a href="https://www.newscham.net/articles/1">https://www.newscham.net/articles/1</a>'
+        '<br/><b>[딘 베이커] 제목</b><br/><br/>본문 문단.</div></div>'
+        '<div data-post="workers2016/101">'
+        '<div class="tgme_widget_message_text js-message_text" dir="auto">'
+        '<b>URL 없는 제목<br/></b><br/>본문만 있는 글</div></div>'
+        '<div data-post="workers2016/102">'
+        '<div class="tgme_widget_message_photo"></div></div>')  # 텍스트 없는(사진만) 글
     posts = parse_workers2016(sample)
-    assert posts == [(100, "첫 줄\n둘째 줄"), (101, "")]
+    assert posts == [
+        (100, "[딘 베이커] 제목", "https://www.newscham.net/articles/1", "본문 문단."),
+        (101, "URL 없는 제목", "https://t.me/workers2016/101", "본문만 있는 글"),
+        (102, "", "https://t.me/workers2016/102", ""),
+    ]
     assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
@@ -785,13 +812,22 @@ def selftest():
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
     assert press_rank("민중언론 참세상") == 0
     assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
-    sample = ('<div data-post="workers2016/100">'
-              '<div class="tgme_widget_message_text js-message_text" dir="auto">'
-              '첫 줄<br/>둘째 줄</div></div>'
-              '<div data-post="workers2016/101">'
-              '<div class="tgme_widget_message_photo"></div></div>')  # 텍스트 없는(사진만) 글
+    sample = (
+        '<div data-post="workers2016/100">'
+        '<div class="tgme_widget_message_text js-message_text" dir="auto">'
+        '<a href="https://www.newscham.net/articles/1">https://www.newscham.net/articles/1</a>'
+        '<br/><b>[딘 베이커] 제목</b><br/><br/>본문 문단.</div></div>'
+        '<div data-post="workers2016/101">'
+        '<div class="tgme_widget_message_text js-message_text" dir="auto">'
+        '<b>URL 없는 제목<br/></b><br/>본문만 있는 글</div></div>'
+        '<div data-post="workers2016/102">'
+        '<div class="tgme_widget_message_photo"></div></div>')  # 텍스트 없는(사진만) 글
     posts = parse_workers2016(sample)
-    assert posts == [(100, "첫 줄\n둘째 줄"), (101, "")]
+    assert posts == [
+        (100, "[딘 베이커] 제목", "https://www.newscham.net/articles/1", "본문 문단."),
+        (101, "URL 없는 제목", "https://t.me/workers2016/101", "본문만 있는 글"),
+        (102, "", "https://t.me/workers2016/102", ""),
+    ]
     assert "기후" in PROGRESSIVE_ONLY_KEYWORDS and "녹색당" not in PROGRESSIVE_ONLY_KEYWORDS
     a = "인권위 “사법경찰리 독자적 조서 작성은 위법”…경찰수사규칙 개정 권고"
     b = '인권위 "경사 이하 경찰관 단독 조서 작성 관행 개정해야" 권고'
