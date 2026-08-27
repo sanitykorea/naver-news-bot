@@ -85,21 +85,15 @@ def _pace_gemini():
     _last_gemini_call[0] = time.time()
 
 
-def is_relevant(kw, title, desc):
-    """API 키가 없거나 호출이 실패하면 통과(발송)시킨다 — AI 장애로 못 보내는 것보단 낫다.
-    명확히 'NO'라고 답할 때만 거른다. 무슨 에러든(429·타임아웃 등) 한 번은 쉬었다 재시도한다 —
-    타임아웃은 재시도 없이 바로 포기하던 버그가 있었다."""
+def _call_gemini(prompt, max_tokens=5):
+    """공통 Gemini 호출. 키가 없거나 실패하면 None. 무슨 에러든(429·타임아웃 등)
+    한 번은 쉬었다가 다른 모델로 재시도한다 — 타임아웃은 재시도 없이 바로 포기하던
+    버그가 있었다. 호출자가 실패 시 어떻게 할지(통과/자르기 등) 정한다."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        return True
-    prompt = (f"다음은 '{kw}' 키워드로 검색된 뉴스 기사다. 진보정당·시민사회 뉴스클리핑 채널에 "
-              f"보낼 만한 시민사회·정치·인권·환경 관련 실질 뉴스인가, 아니면 다음 중 하나인가: "
-              f"증권시황·기업홍보·행정 이벤트성(사회공헌, 명칭공모 등) 기사, 또는 사회적 논쟁이나 "
-              f"실질적 파급력 없이 개별 국회의원실이 낸 통상적인 법안 발의·개정 추진 보도자료성 기사?\n\n"
-              f"제목: {title}\n요약: {desc}\n\n"
-              f"실질 뉴스면 YES, 위 셋 중 하나면 NO 한 단어로만 답해라.")
+        return None
     body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
-                       "generationConfig": {"maxOutputTokens": 5, "temperature": 0}}).encode()
+                       "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0}}).encode()
     for attempt in range(2):
         model = _next_model()  # 재시도 때 호출하면 라운드로빈이라 자연히 다른 모델로 넘어간다
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -109,17 +103,29 @@ def is_relevant(kw, title, desc):
                                           headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=30) as r:  # 15초는 자주 타임아웃됐다
                 data = json.load(r)
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
-            return not _gemini_says_no(text)
+            return data["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
             reason = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
             if attempt == 0:  # 429든 타임아웃이든 한 번은 쉬었다 다른 모델로 재시도
                 print(f"  Gemini 호출 실패({model}, {reason}) — 재시도")
                 time.sleep(5)
                 continue
-            print(f"  Gemini 호출 실패({model}, {reason}, 재시도도 실패) — 통과시킴")
-            return True
-    return True
+            print(f"  Gemini 호출 실패({model}, {reason}, 재시도도 실패)")
+            return None
+    return None
+
+
+def is_relevant(kw, title, desc):
+    """실패하면 통과(발송)시킨다 — AI 장애로 못 보내는 것보단 낫다. 명확히 'NO'라고
+    답할 때만 거른다."""
+    prompt = (f"다음은 '{kw}' 키워드로 검색된 뉴스 기사다. 진보정당·시민사회 뉴스클리핑 채널에 "
+              f"보낼 만한 시민사회·정치·인권·환경 관련 실질 뉴스인가, 아니면 다음 중 하나인가: "
+              f"증권시황·기업홍보·행정 이벤트성(사회공헌, 명칭공모 등) 기사, 또는 사회적 논쟁이나 "
+              f"실질적 파급력 없이 개별 국회의원실이 낸 통상적인 법안 발의·개정 추진 보도자료성 기사?\n\n"
+              f"제목: {title}\n요약: {desc}\n\n"
+              f"실질 뉴스면 YES, 위 셋 중 하나면 NO 한 단어로만 답해라.")
+    text = _call_gemini(prompt, max_tokens=5)
+    return True if text is None else not _gemini_says_no(text)
 
 
 def is_business_noise(title):
@@ -347,16 +353,32 @@ def article(link):
 
 
 def quote_for(kw, paras):
-    """키워드가 나오는 첫 문단, 없으면 첫 문단.
+    """키워드가 나오는 첫 문단, 없으면 첫 문단(자르지 않은 원문).
     본문을 못 읽으면 빈 값 — 링크 미리보기가 요약을 대신하므로 인용구를 생략한다."""
-    hit = next((p for p in paras if kw in p), paras[0] if paras else "")
-    return hit[:QUOTE_MAX] + ("…" if len(hit) > QUOTE_MAX else "")
+    return next((p for p in paras if kw in p), paras[0] if paras else "")
+
+
+def shorten_quote(kw, quote):
+    """QUOTE_MAX 넘으면 자른다. 가능하면 Gemini로 핵심 문장만 원문 그대로 추리고,
+    안 되면(키 없음·호출 실패) 그냥 자른다. 이미 다른 필터를 다 통과해 발송이 확정된
+    항목에만 부르니 호출량 걱정은 없다."""
+    if len(quote) <= QUOTE_MAX:
+        return quote
+    prompt = (f"다음은 '{kw}' 관련 기사에서 뽑은 인용문인데 너무 길다. 핵심 문장 1~2개를 "
+              f"고쳐쓰지 말고 원문 그대로 골라 {QUOTE_MAX}자를 넘지 않게 답해라. "
+              f"설명이나 요약 문구 없이 고른 문장만 출력해라.\n\n{quote}")
+    text = _call_gemini(prompt, max_tokens=400)
+    if text and text.strip():
+        text = text.strip()
+        return text[:QUOTE_MAX] + ("…" if len(text) > QUOTE_MAX else "")
+    return quote[:QUOTE_MAX] + "…"
 
 
 def format_msg(press, title, link, quote):
     head = f"[{press}] {title}" if press else title
-    block = f"<blockquote>{html.escape(quote)}</blockquote>\n\n" if quote else ""
-    return f"<b>{html.escape(head)}</b>\n\n{block}{link}"
+    title_link = f'<a href="{html.escape(link, quote=True)}"><b>{html.escape(head)}</b></a>'
+    block = f"<blockquote>{html.escape(quote)}</blockquote>" if quote else ""
+    return f"{title_link}\n\n{block}" if block else title_link
 
 
 def press_rank(press):
@@ -640,7 +662,8 @@ def main():
             if not is_relevant(kw, title, desc):
                 print(f"  제외(AI 판단): {title[:40]}")
                 continue
-            queue.append((press_rank(press), title, press, link, quote_for(kw, paras)))
+            queue.append((press_rank(press), title, press, link,
+                         shorten_quote(kw, quote_for(kw, paras))))
 
     keep, state["topics"] = pick_by_press(queue, state["topics"])
     for i, (rank, title, *_) in enumerate(queue):
@@ -857,10 +880,12 @@ def selftest():
     assert quote_for("녹색당", paras) == paras[0]
     assert quote_for("없는말", paras) == paras[0]      # 못 찾으면 첫 문단
     assert quote_for("녹색당", []) == ""               # 본문 없으면 인용구 생략
-    assert len(quote_for("녹", ["녹" * 900])) == QUOTE_MAX + 1
+    assert len(quote_for("녹", ["녹" * 900])) == 900  # 이제 안 자르고 원문 그대로 반환
+    assert len(shorten_quote("녹", "녹" * 900)) == QUOTE_MAX + 1  # 키 없으면 그냥 자름(fail-open)
+    assert shorten_quote("녹", "짧음") == "짧음"  # QUOTE_MAX 이내면 그대로
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
-        "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
-    assert format_msg("", "제목", "http://x", "") == "<b>제목</b>\n\nhttp://x"
+        '<a href="http://x"><b>[한겨레] 제목</b></a>\n\n<blockquote>인용</blockquote>')
+    assert format_msg("", "제목", "http://x", "") == '<a href="http://x"><b>제목</b></a>'
     assert tidy("인권침해 소지가 있다며 개정을 권고했다. /김태연 기자") == "인권침해 소지가 있다며 개정을 권고했다."
     assert tidy("[서울=뉴시스] 김태연 기자 = 인권위는 21일 밝혔다.") == "인권위는 21일 밝혔다."
     assert tidy("본문이다. hong@news.co.kr") == "본문이다."
@@ -879,8 +904,8 @@ def selftest():
                                  "“지구를 불태우는 폭주를 멈춰라.”")
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
-        "<b>[한겨레] 제목</b>\n\n<blockquote>인용</blockquote>\n\nhttp://x")
-    assert format_msg("", "제목", "http://x", "") == "<b>제목</b>\n\nhttp://x"
+        '<a href="http://x"><b>[한겨레] 제목</b></a>\n\n<blockquote>인용</blockquote>')
+    assert format_msg("", "제목", "http://x", "") == '<a href="http://x"><b>제목</b></a>'
     assert tidy("인권침해 소지가 있다며 개정을 권고했다. /김태연 기자") == "인권침해 소지가 있다며 개정을 권고했다."
     assert tidy("[서울=뉴시스] 김태연 기자 = 인권위는 21일 밝혔다.") == "인권위는 21일 밝혔다."
     assert tidy("본문이다. hong@news.co.kr") == "본문이다."
