@@ -93,10 +93,11 @@ def is_relevant(kw, title, desc):
     if not key:
         return True
     prompt = (f"다음은 '{kw}' 키워드로 검색된 뉴스 기사다. 진보정당·시민사회 뉴스클리핑 채널에 "
-              f"보낼 만한 시민사회·정치·인권·환경 관련 실질 뉴스인가, 아니면 증권시황·기업홍보·"
-              f"행정 이벤트성(사회공헌, 명칭공모 등) 기사인가?\n\n"
+              f"보낼 만한 시민사회·정치·인권·환경 관련 실질 뉴스인가, 아니면 다음 중 하나인가: "
+              f"증권시황·기업홍보·행정 이벤트성(사회공헌, 명칭공모 등) 기사, 또는 사회적 논쟁이나 "
+              f"실질적 파급력 없이 개별 국회의원실이 낸 통상적인 법안 발의·개정 추진 보도자료성 기사?\n\n"
               f"제목: {title}\n요약: {desc}\n\n"
-              f"실질 뉴스면 YES, 증권/홍보/행정이벤트성이면 NO 한 단어로만 답해라.")
+              f"실질 뉴스면 YES, 위 셋 중 하나면 NO 한 단어로만 답해라.")
     body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
                        "generationConfig": {"maxOutputTokens": 5, "temperature": 0}}).encode()
     for attempt in range(2):
