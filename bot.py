@@ -378,7 +378,7 @@ def format_msg(press, title, link, quote):
     head = f"[{press}] {title}" if press else title
     title_link = f'<a href="{html.escape(link, quote=True)}"><b>{html.escape(head)}</b></a>'
     block = f"<blockquote>{html.escape(quote)}</blockquote>" if quote else ""
-    return f"{title_link}\n\n{block}" if block else title_link
+    return f"{title_link}\n{block}" if block else title_link
 
 
 def press_rank(press):
@@ -568,9 +568,14 @@ def send(msg, preview=True):
     """실패해도 죽지 않는다 — 여기서 죽으면 그 아래의 상태 저장이 안 돌아서,
     다음 실행이 같은 항목을 다시 보내려다 또 실패하는 무한 반복에 빠진다.
     429(과다 요청)는 텔레그램이 알려주는 시간만큼 기다렸다 한 번 재시도한다."""
+    # link_preview_options.prefer_small_media: 미리보기는 유지하되 카드 크기를 줄인다
+    # (구버전 disable_web_page_preview 대체 — 새 API 필드).
+    link_preview = {"is_disabled": not preview}
+    if preview:
+        link_preview["prefer_small_media"] = True
     data = json.dumps({"chat_id": os.environ["TG_CHAT"], "text": msg,
                        "parse_mode": "HTML",
-                       "disable_web_page_preview": not preview}).encode()
+                       "link_preview_options": link_preview}).encode()
     url = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage"
     for attempt in range(2):
         try:
@@ -884,7 +889,7 @@ def selftest():
     assert len(shorten_quote("녹", "녹" * 900)) == QUOTE_MAX + 1  # 키 없으면 그냥 자름(fail-open)
     assert shorten_quote("녹", "짧음") == "짧음"  # QUOTE_MAX 이내면 그대로
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
-        '<a href="http://x"><b>[한겨레] 제목</b></a>\n\n<blockquote>인용</blockquote>')
+        '<a href="http://x"><b>[한겨레] 제목</b></a>\n<blockquote>인용</blockquote>')
     assert format_msg("", "제목", "http://x", "") == '<a href="http://x"><b>제목</b></a>'
     assert tidy("인권침해 소지가 있다며 개정을 권고했다. /김태연 기자") == "인권침해 소지가 있다며 개정을 권고했다."
     assert tidy("[서울=뉴시스] 김태연 기자 = 인권위는 21일 밝혔다.") == "인권위는 21일 밝혔다."
@@ -904,7 +909,7 @@ def selftest():
                                  "“지구를 불태우는 폭주를 멈춰라.”")
     assert clean("<b>퀴어</b>퍼레이드 &amp; 축제") == "퀴어퍼레이드 & 축제"
     assert format_msg("한겨레", "제목", "http://x", "인용") == (
-        '<a href="http://x"><b>[한겨레] 제목</b></a>\n\n<blockquote>인용</blockquote>')
+        '<a href="http://x"><b>[한겨레] 제목</b></a>\n<blockquote>인용</blockquote>')
     assert format_msg("", "제목", "http://x", "") == '<a href="http://x"><b>제목</b></a>'
     assert tidy("인권침해 소지가 있다며 개정을 권고했다. /김태연 기자") == "인권침해 소지가 있다며 개정을 권고했다."
     assert tidy("[서울=뉴시스] 김태연 기자 = 인권위는 21일 밝혔다.") == "인권위는 21일 밝혔다."
