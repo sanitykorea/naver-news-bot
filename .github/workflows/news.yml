@@ -8,19 +8,25 @@ on:
         type: boolean
         default: false
 concurrency: {group: news}            # 실행이 겹쳐 중복 발송되는 것 방지
+permissions:
+  contents: read
+  actions: write   # 캐시 삭제 권한(고정 슬롯 유지에 필요)
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # ponytail: seen.json 을 커밋하는 대신 캐시로 넘긴다. 5분 주기면 커밋이 월 8천 건.
-      - uses: actions/cache@v4
+      # 예전엔 실행마다(run_id) 새 캐시를 만들어서 2,676개까지 쌓였다 — 그 상태에서
+      # restore-keys 가 엉뚱한(오래된) 스냅샷을 물어와, 옛날 기사가 "새 기사"로 재발송된
+      # 사고가 있었다. 고정 키 하나만 쓰고, 저장 전에 그 키를 지워서 항상 슬롯 하나만
+      # 유지한다(actions/cache 는 이미 있는 키로 저장을 못 해서 매번 지워야 갱신된다).
+      - uses: actions/cache/restore@v4
         with:
           path: |
             seen.json
             state.json
-          key: seen-${{ github.run_id }}
-          restore-keys: seen-
+          key: seen-state
       - run: python3 bot.py
         env:
           FORCE_DIGEST: ${{ inputs.force_digest }}
@@ -29,6 +35,18 @@ jobs:
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
+      - name: 캐시 슬롯 갱신 (기존 것 지우고 새로 저장)
+        if: always()
+        run: gh cache delete seen-state --repo "${{ github.repository }}" || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            seen.json
+            state.json
+          key: seen-state
 
       # ponytail: 5분 주기라 계속 실패하면 계속 온다. 시끄러우면 cron 을 늘리거나 실패 카운트를 캐시에 얹을 것.
       - if: failure()

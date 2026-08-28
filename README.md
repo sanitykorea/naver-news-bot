@@ -188,8 +188,14 @@ python3 bot.py --test     # 필터·인용 로직 자체 점검
 기사에 흔한 말이라 전역으로는 안 막고, 이 두 키워드에만 국한했다.
 
 ## 자동화 (GitHub Actions)
-`.github/workflows/news.yml` — 5분마다 실행(GitHub cron 최소 간격, 부하 시 지연될 수 있음).
-상태(`seen.json`)는 커밋 대신 Actions 캐시에 보관한다.
+`.github/workflows/news.yml` — GitHub `schedule`은 지금 꺼두고 외부 크론(cron-job.org 등)이
+`workflow_dispatch`를 2분마다 호출한다(GitHub 자체 스케줄러는 부하 시 지연이 심했다).
+상태(`seen.json`, `state.json`)는 커밋 대신 Actions 캐시에 보관한다.
+
+캐시는 **고정 키(`seen-state`) 하나**를 매번 지우고 다시 저장하는 방식이다 — 실행마다
+새 캐시를 만들던 예전 방식은 하루 만에 수천 개가 쌓여서, `restore-keys`가 엉뚱한 옛날
+스냅샷을 물어와 오래된 기사가 "새 기사"로 재발송되는 사고로 이어졌다. 이 방식을 쓰려면
+워크플로에 `permissions: actions: write`가 있어야 한다(캐시 삭제 권한).
 
 저장소 Settings > Secrets and variables > Actions > Secrets 에 4개 등록:
 `NAVER_ID` `NAVER_SECRET` `TG_TOKEN` `TG_CHAT`
