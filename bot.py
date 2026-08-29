@@ -38,7 +38,7 @@ BUSINESS_NOISE = ("증권", "수출", "수주", "호재", "사회공헌", "관�
 
 
 # 완전 차단할 언론사. is_economy_press 와 별개로 성향·신뢰도 문제로 아예 안 받는 곳.
-BLOCKED_PRESS = ("TV조선", "조선일보", "주간조선")
+BLOCKED_PRESS = ("TV조선", "조선일보", "주간조선", "위키트리", "인사이트")
 
 # 네이버에 안 실려 article() 로 언론사를 못 읽는 매체를 도메인으로 직접 등록한다.
 # 즉시발송 대상이 되고(3시간 모아보기로 안 밀림) PRESS_TIERS[0] 에도 넣어 우선순위를 준다.
@@ -896,6 +896,8 @@ def selftest():
     assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
     assert is_economy_press("매일경제") and is_economy_press("파이낸셜뉴스")
     assert not is_economy_press("한겨레")
+    assert is_blocked_press("위키트리") and is_blocked_press("인사이트")
+    assert not is_blocked_press("한겨레")
     assert is_business_noise("OO기업, 사회공헌활동으로 지역사회 훈훈")
     assert is_business_noise("반도체 수출 호재에 코스피 껑충")
     # 제목엔 없고 요약에만 노이즈가 몰린 경우 (실제 사례: [증시 인사이트] 기사)
