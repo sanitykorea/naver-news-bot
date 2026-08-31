@@ -45,6 +45,10 @@ BLOCKED_PRESS = ("TV조선", "조선일보", "주간조선", "위키트리", "�
 # 즉시발송 대상이 되고(3시간 모아보기로 안 밀림) PRESS_TIERS[0] 에도 넣어 우선순위를 준다.
 TRUSTED_DOMAINS = {"newscham.net": "민중언론 참세상"}
 
+# site_name()이 읽는 og:site_name이 실제 매체명과 다른 곳. 도메인 기준으로 바로잡는다.
+# (예: 뉴스민은 og:site_name에 "대구경북독립언론"이라는 소개 문구를 넣어둔다.)
+PRESS_NAME_OVERRIDE = {"newsmin.co.kr": "뉴스민"}
+
 
 def is_economy_press(press):
     return "경제" in press or press in EXTRA_ECONOMY_PRESS
@@ -370,6 +374,10 @@ def article(link):
 def site_name(link):
     """언론사 원문 링크(모아보기 경로)는 article() 이 포기하는 대상이라 og:site_name
     메타태그로 매체명만 따로 얻는다. 실패해도 빈 문자열 — 모아보기 자체는 그대로 나간다."""
+    domain = urllib.parse.urlparse(link).netloc
+    override = next((n for d, n in PRESS_NAME_OVERRIDE.items() if domain.endswith(d)), None)
+    if override:
+        return override
     try:
         req = urllib.request.Request(link, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -791,6 +799,7 @@ def selftest():
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
     assert press_rank("민중언론 참세상") == 0
     assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
+    assert site_name("https://www.newsmin.co.kr/news/1") == "뉴스민"  # og:site_name 대신 매체명
     sample = (
         '<div data-post="workers2016/100">'
         '<div class="tgme_widget_message_text js-message_text" dir="auto">'
@@ -866,6 +875,7 @@ def selftest():
     assert press_rank("MBC") == 0 and press_rank("JTBC") == 0
     assert press_rank("민중언론 참세상") == 0
     assert TRUSTED_DOMAINS["newscham.net"] == "민중언론 참세상"
+    assert site_name("https://www.newsmin.co.kr/news/1") == "뉴스민"  # og:site_name 대신 매체명
     sample = (
         '<div data-post="workers2016/100">'
         '<div class="tgme_widget_message_text js-message_text" dir="auto">'
