@@ -2,6 +2,7 @@
 """네이버 뉴스 검색(최신순) → 새 기사만 텔레그램 채널로 발송."""
 import html, json, os, pathlib, re, socket, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 # ponytail: GitHub Actions 러너에서 구글 API(Gemini)로 가는 IPv6 경로가 간헐적으로
 # 멈추는 문제가 있다 — 로컬에선 1.7초, GH Actions에선 30초 타임아웃이 매번 났다.
@@ -224,6 +225,10 @@ QUOTE_MAX = 700
 # ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
 # 한 번에 이만큼 넘으면 발송을 건너뛰고 기록만 한다 (첫 실행과 같은 처리).
 MAX_BURST = 30
+# 네이버 검색이 sort=date 라도 재인덱싱된 옛날 기사가 최상단에 다시 뜰 때가 있다
+# (예: pubDate 7주 전 기사가 오늘 처음 잡힘). URL 기반 dedup만으론 "새 기사"로 오인해
+# 발송한다 — pubDate 자체가 이만큼 오래됐으면 발송하지 않고 조용히 버린다.
+FRESH_MAX_AGE = timedelta(hours=24)
 DIGEST_MAX = 60  # 모아보기 한 구간에 이만큼 넘게 쌓이면 폭탄 방지로 건너뛴다
 # 네이버 뉴스 페이지가 없는 기사는 즉시 보내지 않고 모아뒀다가 3시간마다 묶어서 보낸다.
 KST = timezone(timedelta(hours=9))
@@ -254,6 +259,8 @@ def search(kw):
                  "X-NCP-APIGW-API-KEY": os.environ["NAVER_SECRET"]})
     with urllib.request.urlopen(req, timeout=20) as r:
         items = json.load(r)["items"]
+    now = datetime.now(timezone.utc)
+    items = [i for i in items if now - parsedate_to_datetime(i["pubDate"]) <= FRESH_MAX_AGE]
     # 네이버뉴스 페이지가 있으면 그 링크, 없으면 언론사 원문
     return [(clean(i["title"]), i.get("link") or i["originallink"], clean(i["description"])) for i in items]
 
@@ -898,6 +905,9 @@ def selftest():
     assert not is_economy_press("한겨레")
     assert is_blocked_press("위키트리") and is_blocked_press("인사이트")
     assert not is_blocked_press("한겨레")
+    now = datetime.now(timezone.utc)
+    assert now - parsedate_to_datetime("Mon, 01 Jan 2026 00:00:00 +0900") > FRESH_MAX_AGE
+    assert now - parsedate_to_datetime(now.strftime("%a, %d %b %Y %H:%M:%S +0000")) <= FRESH_MAX_AGE
     assert is_business_noise("OO기업, 사회공헌활동으로 지역사회 훈훈")
     assert is_business_noise("반도체 수출 호재에 코스피 껑충")
     # 제목엔 없고 요약에만 노이즈가 몰린 경우 (실제 사례: [증시 인사이트] 기사)
