@@ -367,6 +367,19 @@ def article(link):
                    if len(t) > 30 and not PHOTO_CAPTION.search(t)]
 
 
+def site_name(link):
+    """언론사 원문 링크(모아보기 경로)는 article() 이 포기하는 대상이라 og:site_name
+    메타태그로 매체명만 따로 얻는다. 실패해도 빈 문자열 — 모아보기 자체는 그대로 나간다."""
+    try:
+        req = urllib.request.Request(link, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            page = r.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+    m = re.search(r'og:site_name["\']\s*content=["\']([^"\']+)', page)
+    return html.unescape(m.group(1)).strip() if m else ""
+
+
 def quote_for(kw, paras):
     """키워드가 나오는 첫 문단, 없으면 첫 문단(자르지 않은 원문).
     본문을 못 읽으면 빈 값 — 링크 미리보기가 요약을 대신하므로 인용구를 생략한다."""
@@ -470,13 +483,14 @@ def digest_messages(items, at):
     ampm, h12 = ("오전", at.hour) if at.hour < 12 else ("오후", at.hour - 12)
     lines = [f"📰 <b>{ampm} {h12 or 12}시의 키워드 뉴스 보기</b>"]
     groups = {}
-    for kw, title, link, desc in items:
-        groups.setdefault(kw, []).append((title, link))
+    for kw, title, link, desc, press in items:
+        groups.setdefault(kw, []).append((title, link, press))
     for arts in groups.values():
         lines.append("")  # 키워드명은 안 쓰고 빈 줄로만 묶음을 구분한다
-        for title, link in arts:
+        for title, link, press in arts:
+            head = f"[{press}] {title}" if press else title
             lines.append(f'• <a href="{html.escape(link, quote=True)}">'
-                         f"<b>{html.escape(title)}</b></a>")
+                         f"<b>{html.escape(head)}</b></a>")
     msgs, cur = [], ""
     for ln in lines:
         if not cur and not ln:
@@ -596,6 +610,7 @@ def flush_digest(state, now):
         print(f"모아보기 대상 {len(items)}건 — {DIGEST_MAX}건을 넘어 발송을 건너뛰고 기록만 한다.")
         print("(키워드를 추가했다면 정상. 다음 구간부터 정상 분량만 모인다)")
         items = []
+    items = [(kw, title, link, desc, site_name(link)) for kw, title, link, desc in items]
     for msg in digest_messages(items, here):
         send(msg, preview=False)
     if items:
@@ -835,14 +850,15 @@ def selftest():
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
-    m = digest_messages([["녹색당", "제목1", "http://a", ""], ["녹색당", "제목2", "http://b", ""],
-                         ["정의당", "제목3", "http://c", ""]], at)
+    m = digest_messages([["녹색당", "제목1", "http://a", "", ""], ["녹색당", "제목2", "http://b", "", ""],
+                         ["정의당", "제목3", "http://c", "", "언론사"]], at)
     assert len(m) == 1 and m[0].startswith("📰 <b>오전 9시의 키워드 뉴스 보기</b>")
     assert "녹색당" not in m[0] and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert '<b>[언론사] 제목3</b>' in m[0]  # 매체명 있으면 [매체명] 접두
     assert m[0].count("\n\n") == 2  # 묶음 사이 빈 줄
-    assert len(digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at)) > 1
+    assert len(digest_messages([["kw", "제" * 200, f"http://{i}", "", ""] for i in range(30)], at)) > 1
     assert all(len(x) <= MSG_MAX for x in
-               digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at))
+               digest_messages([["kw", "제" * 200, f"http://{i}", "", ""] for i in range(30)], at))
     assert spurious("차별금지법", "장애인차별금지법 개정 논의")
     assert not spurious("차별금지법", "장애인차별금지법과 차별금지법은 다르다")
     assert not spurious("차별금지법", "포괄적 차별 금지법 제정 논의")   # 띄어쓰기 허용
@@ -909,14 +925,15 @@ def selftest():
     assert slot(datetime(2026, 8, 24, 10, 59, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 11, 1, tzinfo=KST)) == at
     assert slot(datetime(2026, 8, 24, 12, 0, tzinfo=KST)).hour == 12
-    m = digest_messages([["녹색당", "제목1", "http://a", ""], ["녹색당", "제목2", "http://b", ""],
-                         ["정의당", "제목3", "http://c", ""]], at)
+    m = digest_messages([["녹색당", "제목1", "http://a", "", ""], ["녹색당", "제목2", "http://b", "", ""],
+                         ["정의당", "제목3", "http://c", "", "언론사"]], at)
     assert len(m) == 1 and m[0].startswith("📰 <b>오전 9시의 키워드 뉴스 보기</b>")
     assert "녹색당" not in m[0] and '<a href="http://a"><b>제목1</b></a>' in m[0]
+    assert '<b>[언론사] 제목3</b>' in m[0]  # 매체명 있으면 [매체명] 접두
     assert m[0].count("\n\n") == 2  # 묶음 사이 빈 줄
-    assert len(digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at)) > 1
+    assert len(digest_messages([["kw", "제" * 200, f"http://{i}", "", ""] for i in range(30)], at)) > 1
     assert all(len(x) <= MSG_MAX for x in
-               digest_messages([["kw", "제" * 200, f"http://{i}", ""] for i in range(30)], at))
+               digest_messages([["kw", "제" * 200, f"http://{i}", "", ""] for i in range(30)], at))
     assert spurious("차별금지법", "성정체성 차별 금지 명시해야")        # '법'이 없으면 오탐
     assert is_economy_press("매일경제") and is_economy_press("파이낸셜뉴스")
     assert not is_economy_press("한겨레")
