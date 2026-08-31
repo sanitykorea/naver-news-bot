@@ -132,6 +132,13 @@ def is_relevant(kw, title, desc):
 def is_business_noise(title):
     return any(w in title for w in BUSINESS_NOISE)
 
+
+PHOTO_TITLE = re.compile(r"\[\s*(포토|화보)\s*\]")
+
+
+def is_photo_title(title):
+    return bool(PHOTO_TITLE.search(title))
+
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
 KEYWORDS_FILE = HERE / "keywords.txt"
@@ -216,10 +223,11 @@ PROGRESSIVE_ONLY_KEYWORDS = ("기후", "환경", "인권", "노동")
 # 중반 이후 한두 번은 비교 사례라 통과시킨다. 오탐이 잦으면 숫자만 조절할 것.
 LEAD_PARAS = 2      # 리드로 볼 문단 수
 MENTION_LIMIT = 3   # 본문 전체에서 이 횟수 이상 나오면 비중이 높다고 본다
-# "英 녹색당 정책 논쟁" 처럼 해외 기사라도 "녹색당" 자체가 2회 이상 나오면
-# (독일 뷘트니스 90/디그뤼넨을 "독일 녹색당"으로 부르는 경우 등) 주요하게 다뤄진 걸로
-# 보고 국가 제외를 무시하고 보낸다. 1회뿐이면 그냥 스쳐가는 언급으로 본다.
-FOREIGN_OVERRIDE_MENTIONS = 2
+# "英 녹색당 정책 논쟁" 처럼 해외 기사라도 "녹색당" 자체가 많이 나오면(독일 뷘트니스
+# 90/디그뤼넨을 "독일 녹색당"으로 부르는 경우 등) 주요하게 다뤄진 걸로 보고 국가 제외를
+# 무시하고 보낸다. 2회는 너무 낮아 "영국 진보 정당 녹색당의 수장은..." 처럼 해외 정당
+# 소개 기사에도 흔히 걸렸다 — 그 정도로는 안 뚫리게 기준을 올렸다.
+FOREIGN_OVERRIDE_MENTIONS = 4
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 QUOTE_MAX = 700
 # ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
@@ -408,21 +416,22 @@ def same_topic(a, b):
     return len(A & B) / min(len(A), len(B)) >= TOPIC_SIM
 
 
-def register_topic(rank, compare_text, topics):
+def register_topic(rank, title, compare_text, topics):
     """topics 를 제자리에서 갱신한다(리스트라 호출자에 반영됨). 반환값: 보낼지 여부.
-    진보언론(순위 0)은 같은 사안이라도 매번 통과. 그 외는 이미 기록된 것보다
-    더 우선하는 매체일 때만 통과. compare_text 는 화면에 보일 제목이 아니라 사안을
-    판별할 텍스트 — 제목만 비교하면 각 언론사가 다른 발언을 인용 제목으로 뽑을 때
-    (예: 같은 행사 발언인데 서로 다른 문장을 헤드라인으로 쓰는 경우) 못 묶는다.
-    본문 전체로 비교하면 실측상 같은 사안 최소 0.57 / 무관 기사 최대 0.13으로 확실히 갈린다."""
+    같은 사안이 이미 기록돼 있으면, 그보다 더 우선하는 매체가 뒤늦게 나온 경우(등급 격상)
+    나 "[단독]" 표시가 붙은 경우(새 사실관계로 본다)만 통과. 그 외(같은 등급이 또 오는
+    경우 등)는 막는다 — 진보언론이라도 이미 다룬 사안을 계속 반복해서 보내면 피로도만
+    쌓인다. compare_text 는 화면에 보일 제목이 아니라 사안을 판별할 텍스트 — 제목만
+    비교하면 각 언론사가 다른 발언을 인용 제목으로 뽑을 때(예: 같은 행사 발언인데 서로
+    다른 문장을 헤드라인으로 쓰는 경우) 못 묶는다. 본문 전체로 비교하면 실측상 같은 사안
+    최소 0.57 / 무관 기사 최대 0.13으로 확실히 갈린다."""
     hit = next((t for t in topics if same_topic(compare_text, t[0])), None)
     if hit is None:
         topics.insert(0, [compare_text, rank])
         return True
-    if rank == 0 or rank < hit[1]:
-        hit[1] = min(hit[1], rank)
-        return True
-    return False
+    send = rank < hit[1] or "[단독]" in title
+    hit[1] = min(hit[1], rank)
+    return send
 
 
 def pick_by_press(cands, topics):
@@ -430,7 +439,7 @@ def pick_by_press(cands, topics):
     비교는 본문(compare_text, 마지막 요소)으로, 우선순위 판단은 rank(첫 요소)로 한다."""
     topics = [list(t) for t in topics]
     keep = {i for i in sorted(range(len(cands)), key=lambda i: cands[i][0])  # 우선 매체부터 판단
-            if register_topic(cands[i][0], cands[i][-1], topics)}
+            if register_topic(cands[i][0], cands[i][1], cands[i][-1], topics)}
     return keep, topics[:TOPICS_KEEP]
 
 
@@ -442,7 +451,7 @@ def dedup_digest(items, topics):
     """(살아남은 항목들, 갱신된 사안 목록). items 는 [kw, title, link, desc] 리스트.
     본문을 못 읽는 경로라 제목+요약으로 비교한다(즉시발송의 본문 비교보다는 약하다)."""
     topics = [list(t) for t in topics]
-    kept = [it for it in items if register_topic(DIGEST_RANK, it[1] + " " + it[3], topics)]
+    kept = [it for it in items if register_topic(DIGEST_RANK, it[1], it[1] + " " + it[3], topics)]
     return kept, topics[:TOPICS_KEEP]
 
 
@@ -560,7 +569,8 @@ def flush_digest(state, now):
     # 수집 시점 이후 필터 규칙(BUSINESS_NOISE, AI 판단 등)이 추가됐거나 그때는 호출이
     # 실패했을 수 있으니 발송 직전 다시 검사한다. 큐에 오래(최대 3시간) 머무는
     # 모아보기라 이 재검사가 없으면 규칙 추가 전에 쌓인 재고가 그대로 나간다.
-    items = [i for i in state["digest"] if not is_business_noise(i[1] + i[3])]
+    items = [i for i in state["digest"]
+              if not is_business_noise(i[1] + i[3]) and not is_photo_title(i[1])]
     items = [i for i in items if is_relevant(i[0], i[1], i[3])]
     dropped = len(state["digest"]) - len(items)
     if dropped:
@@ -655,6 +665,9 @@ def main():
                 # "[증시 인사이트] 낙폭 만회..." 처럼 제목엔 안 보여도 네이버 요약에
                 # "수주잔고 성장 기대" 식으로 몰려 있는 경우가 있어 요약도 같이 본다.
                 print(f"  제외(기업 홍보성): {title[:40]}")
+                continue
+            if is_photo_title(title):  # [포토]·[화보] — 사진만 있고 기사 본문은 없다
+                print(f"  제외(포토): {title[:40]}")
                 continue
             trusted_press = next((p for d, p in TRUSTED_DOMAINS.items()
                                   if urllib.parse.urlparse(link).netloc.endswith(d)), None)
@@ -793,8 +806,10 @@ def selftest():
     # 통신사·그 외는 같은 등급이 또 오면 안 보낸다
     assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
     assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
-    # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
-    assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
+    # 진보언론이라도 같은 등급이 이미 같은 사안을 보냈으면 또 보내지 않는다
+    assert pick_by_press([(0, b)], [[a, 0]])[0] == set()
+    # "[단독]" 표시가 붙으면 같은 사안·같은 등급이어도 다시 보낸다
+    assert pick_by_press([(0, "[단독] " + b)], [[a, 0]])[0] == {0}
     # 실제 사례: 같은 행사인데 언론사마다 다른 발언을 제목으로 뽑아 제목만으로는 안 갈렸다.
     # (rank, title, ..., compare_text) 형태로 넘기면 비교는 마지막 요소(본문)로 한다.
     quotes_same_event = [
@@ -865,8 +880,10 @@ def selftest():
     # 통신사·그 외는 같은 등급이 또 오면 안 보낸다
     assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
     assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
-    # 진보언론은 이미 진보언론으로 나갔어도 또 나오면 다시 보낸다
-    assert pick_by_press([(0, b)], [[a, 0]])[0] == {0}
+    # 진보언론이라도 같은 등급이 이미 같은 사안을 보냈으면 또 보내지 않는다
+    assert pick_by_press([(0, b)], [[a, 0]])[0] == set()
+    # "[단독]" 표시가 붙으면 같은 사안·같은 등급이어도 다시 보낸다
+    assert pick_by_press([(0, "[단독] " + b)], [[a, 0]])[0] == {0}
     # 실제 사례: 같은 행사인데 언론사마다 다른 발언을 제목으로 뽑아 제목만으로는 안 갈렸다.
     # (rank, title, ..., compare_text) 형태로 넘기면 비교는 마지막 요소(본문)로 한다.
     quotes_same_event = [
@@ -908,6 +925,13 @@ def selftest():
     now = datetime.now(timezone.utc)
     assert now - parsedate_to_datetime("Mon, 01 Jan 2026 00:00:00 +0900") > FRESH_MAX_AGE
     assert now - parsedate_to_datetime(now.strftime("%a, %d %b %Y %H:%M:%S +0000")) <= FRESH_MAX_AGE
+    assert is_photo_title("[포토] 국회 앞 기자회견") and is_photo_title("[화보] 촛불 행렬")
+    assert not is_photo_title("녹색당 국회 앞 기자회견")
+    # 해외 정당 소개 기사처럼 "녹색당"이 2~3회만 나오면 국가명 제외를 뚫으면 안 된다
+    assert excluded("녹색당", "英 정치 뒤흔드는 사회주의",
+                     ["영국 진보 정당 녹색당의 대표는...", "녹색당은 지방선거에서도 돌풍을..."])
+    assert excluded("녹색당", "英 정치 뒤흔드는 사회주의",
+                     ["영국 녹색당 대표는... 녹색당은... 녹색당 소속... 녹색당 지지율..."]) is None
     assert is_business_noise("OO기업, 사회공헌활동으로 지역사회 훈훈")
     assert is_business_noise("반도체 수출 호재에 코스피 껑충")
     # 제목엔 없고 요약에만 노이즈가 몰린 경우 (실제 사례: [증시 인사이트] 기사)
@@ -926,7 +950,8 @@ def selftest():
     assert on_topic("체제전환운동", "체제전환\n운동 관련")  # 줄바꿈 등 공백은 무시
     assert not spurious("성소수자", "성소수자 관련 기사")  # 등록 안 된 키워드는 통과
     assert excluded("녹색당", "英 총선서 녹색당 약진", []) == "제목"  # 1회뿐 — 그냥 스침
-    assert excluded("녹색당", "英 총선서 녹색당 약진", ["녹색당은 이번 선거에서 의석을 늘렸다" * 2]) is None  # 2회 이상 — 통과
+    assert excluded("녹색당", "英 총선서 녹색당 약진",
+                     ["녹색당은 이번 선거에서 의석을 늘렸다" * 2]) == "제목"  # 3회 — 아직 부족
     assert excluded("녹색당", "녹색당 언급, 흉상 성추행 논란", ["파리 명물이 수난이다" + "x" * 30]) == "리드"
     assert excluded("녹색당", "녹색당 언급, 국내 기사", ["국내" * 20] * 3 + ["독일 미국 영국 사례"]) == "본문 3회"
     assert excluded("녹색당", "녹색당 언급, 국내 기사", ["국내" * 20] * 3 + ["독일 사례도 있다"]) is None
