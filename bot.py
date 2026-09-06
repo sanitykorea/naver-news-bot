@@ -143,6 +143,33 @@ PHOTO_TITLE = re.compile(r"\[\s*(포토|화보)\s*\]")
 def is_photo_title(title):
     return bool(PHOTO_TITLE.search(title))
 
+
+URGENT_TITLE = re.compile(r"\[\s*(단독|속보)\s*\]")
+# 오피니언/칼럼 코너명. 대개 "[코너명]" 또는 "[코너명/필자]"로 제목 앞뒤에 붙는다.
+# 모든 매체의 코너명을 다 알 수 없어 자주 보이는 것만 등록하고, "[.../...]"
+# 형태(코너명/필자)는 일반 패턴으로 같이 잡는다 — ponytail: 놓치는 코너명이 있으면 추가.
+OPINION_MARKERS = ("기고", "칼럼", "사설", "시론", "여적", "만물상", "분수대", "유레카",
+                    "아침햇발", "지평선", "기자수첩", "취재수첩", "데스크칼럼",
+                    "광화문에서", "뉴스룸에서")
+OPINION_TITLE = re.compile(r"^\s*\[([^\]]+)\]|\[([^\]]+)\]\s*$")
+
+
+def is_opinion_title(title):
+    m = OPINION_TITLE.search(title)
+    if not m:
+        return False
+    tag = m.group(1) or m.group(2)
+    return "/" in tag or any(w in tag for w in OPINION_MARKERS)
+
+
+def is_urgent(title):
+    """즉시발송 후보 중 정말 지금 보낼지 가른다. [단독]/[속보]는 무조건 긴급이고,
+    그 외엔 기고·칼럼류만 비긴급으로 미룬다(그 외 일반 보도는 그대로 즉시발송).
+    비긴급은 보내지 않고 모아보기 큐로 넘어가 3시간 뒤 같이 나간다."""
+    if URGENT_TITLE.search(title):
+        return True
+    return not is_opinion_title(title)
+
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
 KEYWORDS_FILE = HERE / "keywords.txt"
@@ -618,7 +645,7 @@ def flush_digest(state, now):
         print(f"모아보기 대상 {len(items)}건 — {DIGEST_MAX}건을 넘어 발송을 건너뛰고 기록만 한다.")
         print("(키워드를 추가했다면 정상. 다음 구간부터 정상 분량만 모인다)")
         items = []
-    items = [(kw, title, link, desc, site_name(link)) for kw, title, link, desc in items]
+    items = [(kw, title, link, desc, press or site_name(link)) for kw, title, link, desc, press in items]
     for msg in digest_messages(items, here):
         send(msg, preview=False)
     if items:
@@ -672,8 +699,9 @@ def main():
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     state.setdefault("digest", [])
     state.setdefault("topics", [])
-    # 예전 캐시엔 [kw, title, link] 3개짜리 항목이 남아있을 수 있다. desc 없이 마이그레이션.
-    state["digest"] = [d if len(d) == 4 else d + [""] for d in state["digest"]]
+    # 예전 캐시엔 [kw, title, link] 나 [kw, title, link, desc] 짜리 항목이 남아있을 수
+    # 있다. desc·press 없이(빈 문자열로) 5개짜리 [kw, title, link, desc, press]로 맞춘다.
+    state["digest"] = [d + [""] * (5 - len(d)) for d in state["digest"]]
     first_run = not seen  # 빈 목록도 첫 실행. 있으나 마나 한 파일에 속아 전체를 발송하지 않는다
     known, fresh, queue = set(seen), [], []
     for kw in KEYWORDS:
@@ -703,7 +731,7 @@ def main():
                 if (on_topic(kw, title + desc) and not spurious(kw, title + desc)
                         and not excluded(kw, title, [], desc)):
                     if is_relevant(kw, title, desc):
-                        state["digest"].append([kw, title, link, desc])  # 3시간마다 묶어서 발송
+                        state["digest"].append([kw, title, link, desc, ""])  # 3시간마다 묶어서 발송
                     else:
                         print(f"  제외(AI 판단): {title[:40]}")
                 continue
@@ -732,6 +760,11 @@ def main():
                 continue
             if not is_relevant(kw, title, desc):
                 print(f"  제외(AI 판단): {title[:40]}")
+                continue
+            if not is_urgent(title):
+                # 발행량이 너무 많아 기고·칼럼류는 즉시발송 대신 모아보기로 미룬다.
+                print(f"  비긴급(기고·칼럼) — 모아보기로 이월: {title[:36]}")
+                state["digest"].append([kw, title, link, desc, press])
                 continue
             queue.append((press_rank(press), title, press, link,
                          shorten_quote(kw, quote_for(kw, paras)), body_all))
@@ -954,6 +987,14 @@ def selftest():
     assert now - parsedate_to_datetime(now.strftime("%a, %d %b %Y %H:%M:%S +0000")) <= FRESH_MAX_AGE
     assert is_photo_title("[포토] 국회 앞 기자회견") and is_photo_title("[화보] 촛불 행렬")
     assert not is_photo_title("녹색당 국회 앞 기자회견")
+    assert is_opinion_title("[광화문에서/하정민]주요국 정치")  # 코너명/필자 형태
+    assert is_opinion_title("[여적]촛불이 남긴 것")
+    assert is_opinion_title("한강은 협곡으로 변해간다 [뉴스룸에서]")  # 제목 끝에도 붙는다
+    assert not is_opinion_title("녹색당, 국회 앞 기자회견 열어")
+    assert is_urgent("[단독] 녹색당 대표 인터뷰")  # 단독은 기고여도 무조건 긴급
+    assert is_urgent("[속보] 녹색당 대표 낙마")
+    assert is_urgent("녹색당, 국회 앞 기자회견 열어")  # 일반 보도는 그대로 긴급
+    assert not is_urgent("[여적]촛불이 남긴 것")  # 칼럼은 모아보기로 이월
     # 해외 정당 소개 기사처럼 "녹색당"이 2~3회만 나오면 국가명 제외를 뚫으면 안 된다
     assert excluded("녹색당", "英 정치 뒤흔드는 사회주의",
                      ["영국 진보 정당 녹색당의 대표는...", "녹색당은 지방선거에서도 돌풍을..."])
