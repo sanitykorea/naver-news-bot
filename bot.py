@@ -150,7 +150,7 @@ URGENT_TITLE = re.compile(r"\[\s*(단독|속보)\s*\]")
 # 형태(코너명/필자)는 일반 패턴으로 같이 잡는다 — ponytail: 놓치는 코너명이 있으면 추가.
 OPINION_MARKERS = ("기고", "칼럼", "사설", "시론", "여적", "만물상", "분수대", "유레카",
                     "아침햇발", "지평선", "기자수첩", "취재수첩", "데스크칼럼",
-                    "광화문에서", "뉴스룸에서")
+                    "광화문에서", "뉴스룸에서", "미디어세상", "아침을 열며")
 OPINION_TITLE = re.compile(r"^\s*\[([^\]]+)\]|\[([^\]]+)\]\s*$")
 
 
@@ -162,13 +162,25 @@ def is_opinion_title(title):
     return "/" in tag or any(w in tag for w in OPINION_MARKERS)
 
 
+# 영화·연예 기사. is_ent_sports()는 entertain.naver.com 도메인만 잡는데, 요즘은 같은
+# 콘텐츠가 일반 n.news.naver.com/mnews 로도 나온다(예: 헐리웃 배우 인터뷰가 sid=101로
+# 걸림) — 도메인이 아니라 제목 어휘로 한 번 더 본다. "아이돌"은 "아이돌봄"과 겹쳐 뺐다.
+ENTERTAINMENT_MARKERS = ("영화", "드라마", "넷플릭스", "OTT", "예능", "박스오피스",
+                          "개봉", "시청률", "뮤직비디오", "컴백", "내한공연", "팬미팅",
+                          "캐스팅", "출연진")
+
+
+def is_entertainment_title(title):
+    return any(w in title for w in ENTERTAINMENT_MARKERS)
+
+
 def is_urgent(title):
     """즉시발송 후보 중 정말 지금 보낼지 가른다. [단독]/[속보]는 무조건 긴급이고,
-    그 외엔 기고·칼럼류만 비긴급으로 미룬다(그 외 일반 보도는 그대로 즉시발송).
-    비긴급은 보내지 않고 모아보기 큐로 넘어가 3시간 뒤 같이 나간다."""
+    그 외엔 기고·칼럼류·영화연예 기사만 비긴급으로 미룬다(그 외 일반 보도는 그대로
+    즉시발송). 비긴급은 보내지 않고 모아보기 큐로 넘어가 3시간 뒤 같이 나간다."""
     if URGENT_TITLE.search(title):
         return True
-    return not is_opinion_title(title)
+    return not (is_opinion_title(title) or is_entertainment_title(title))
 
 HERE = pathlib.Path(__file__).parent
 ENV, SEEN, STATE = HERE / ".env", HERE / "seen.json", HERE / "state.json"
@@ -995,6 +1007,11 @@ def selftest():
     assert is_urgent("[속보] 녹색당 대표 낙마")
     assert is_urgent("녹색당, 국회 앞 기자회견 열어")  # 일반 보도는 그대로 긴급
     assert not is_urgent("[여적]촛불이 남긴 것")  # 칼럼은 모아보기로 이월
+    assert is_opinion_title("[미디어세상] 언론의 책무")
+    assert is_opinion_title("기후위기와 민주주의 [아침을 열며]")
+    assert is_entertainment_title("넷플릭스 신작 드라마 개봉…시청률 고공행진")
+    assert not is_entertainment_title("유모차 출근하던 용혜인, '아이돌봄 지원'엔 반대표")
+    assert not is_urgent("넷플릭스 신작 드라마서 성소수자 캐릭터 논란")  # 연예 기사는 비긴급
     # 해외 정당 소개 기사처럼 "녹색당"이 2~3회만 나오면 국가명 제외를 뚫으면 안 된다
     assert excluded("녹색당", "英 정치 뒤흔드는 사회주의",
                      ["영국 진보 정당 녹색당의 대표는...", "녹색당은 지방선거에서도 돌풍을..."])
