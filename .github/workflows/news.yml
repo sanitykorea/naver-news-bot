@@ -55,10 +55,12 @@ jobs:
       - name: 오래된 캐시 슬롯 정리 (최신 것만 남기고 삭제)
         if: always()
         run: |
-          gh cache list --key seen-state- --sort created-at --order desc \
-            --json id,createdAt --limit 100 \
+          set +e
+          gh cache list --repo "${{ github.repository }}" --key seen-state- \
+            --sort created_at --order desc --json id --limit 100 \
           | jq -r '.[1:][].id' \
-          | xargs -r -n1 gh cache delete --repo "${{ github.repository }}" || true
+          | xargs -r -n1 gh cache delete --repo "${{ github.repository }}"
+          exit 0
         env:
           GH_TOKEN: ${{ github.token }}
 
