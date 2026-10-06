@@ -1,6 +1,7 @@
 name: naver-news-telegram
 on:
-  # schedule 일시 중지 — 반복 발송 원인 조사 중. workflow_dispatch로만 수동 실행 가능.
+  # schedule 은 쓰지 않는다 — 외부 크론(cron-job.org)이 2분마다 workflow_dispatch 를 호출한다
+  # (GitHub 자체 스케줄러는 부하 시 지연이 12~85분까지 났다). 수동 실행도 여기서 가능.
   workflow_dispatch:
     inputs:
       force_digest:
@@ -45,6 +46,7 @@ jobs:
           NAVER_SECRET: ${{ secrets.NAVER_SECRET }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
+          TG_ALERT_CHAT: ${{ secrets.TG_ALERT_CHAT }}  # 선택 — 없으면 상태 소실 알림만 생략된다
       - uses: actions/cache/save@v4
         if: always()
         with:
@@ -64,7 +66,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # ponytail: 5분 주기라 계속 실패하면 계속 온다. 시끄러우면 cron 을 늘리거나 실패 카운트를 캐시에 얹을 것.
+      # ponytail: 2분 주기라 계속 실패하면 계속 온다. 시끄러우면 cron 을 늘리거나 실패 카운트를 캐시에 얹을 것.
       - if: failure()
         run: |
           curl -sS -X POST "https://api.telegram.org/bot${{ secrets.TG_TOKEN }}/sendMessage" \

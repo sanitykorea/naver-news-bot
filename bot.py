@@ -609,11 +609,14 @@ def check_workers2016(state):
         state["workers2016_last"] = max((i for i, _, _, _ in posts), default=0)
         return state
     new = sorted((i, t, l, b) for i, t, l, b in posts if i > last and (t or b))
+    done = 0
     for i, title, link, body in new:
-        send(format_msg("참세상", title, link, shorten_quote("참세상", body)))
+        if not send(format_msg("참세상", title, link, shorten_quote("참세상", body))):
+            break  # 실패한 글부터 다음 실행에서 순서대로 다시 시도한다
         state["workers2016_last"] = i
+        done += 1
     if new:
-        print(f"워커스2016 {len(new)}건 전달")
+        print(f"워커스2016 {done}/{len(new)}건 전달")
     return state
 
 
@@ -637,6 +640,7 @@ def flush_digest(state, now):
     if dropped:
         print(f"모아보기 재검사로 {dropped}건 추가 제외")
     # 같은 사안을 여러 매체가 받아쓴 것들을 즉시발송과 같은 사안 목록(state["topics"])으로 묶는다.
+    topics_before = state["topics"]  # 발송 전부 실패 시 되돌린다(안 그러면 재시도 때 자기들끼리 중복으로 걸러진다)
     items, state["topics"] = dedup_digest(items, state["topics"])
     if DIGEST_DISABLED:
         if items:
@@ -658,24 +662,49 @@ def flush_digest(state, now):
         print("(키워드를 추가했다면 정상. 다음 구간부터 정상 분량만 모인다)")
         items = []
     items = [(kw, title, link, desc, press or site_name(link)) for kw, title, link, desc, press in items]
-    for msg in digest_messages(items, here):
-        send(msg, preview=False)
+    msgs = digest_messages(items, here)
+    results = [send(m, preview=False) for m in msgs]
+    if msgs and not any(results):
+        # 한 통도 못 보냈으면 비우지 않는다 — 슬롯도 그대로라 다음 실행이 다시 시도한다.
+        # (일부만 성공한 경우는 재발송하면 앞 통이 중복되니 그대로 넘어간다)
+        print(f"모아보기 발송 전부 실패({len(items)}건) — 보관한 채 다음 실행에서 다시 시도한다")
+        state["topics"] = topics_before
+        return state
     if items:
         print(f"모아보기 {len(items)}건 발송")
     state["slot"], state["digest"] = here.isoformat(), []
     return state
 
 
-def send(msg, preview=True):
+# 이 오류들은 메시지 자체의 문제라 다시 보내도 똑같이 실패한다 — 버리고 넘어간다.
+# 그 외 실패(5xx·네트워크·토큰/채널 문제)는 False 를 돌려줘 호출부가 다음 실행에서 재시도한다.
+PERMANENT_SEND_ERRORS = ("can't parse entities", "message is too long", "message text is empty")
+
+
+def is_permanent_send_error(body):
+    return any(e in body for e in PERMANENT_SEND_ERRORS)
+
+
+def forget_failed(fresh, topics, failed):
+    """failed: [(link, body_all)] — 보내지 못한 기사. 그대로 두면 "이미 본 것"·"이미 보낸
+    사안"으로 기록돼 영영 재시도되지 않으니, seen 목록과 사안 목록에서 빼서 다음 실행이
+    새 기사로 다시 시도하게 한다."""
+    links, bodies = {l for l, _ in failed}, {b for _, b in failed}
+    return [l for l in fresh if l not in links], [t for t in topics if t[0] not in bodies]
+
+
+def send(msg, preview=True, chat=None):
     """실패해도 죽지 않는다 — 여기서 죽으면 그 아래의 상태 저장이 안 돌아서,
     다음 실행이 같은 항목을 다시 보내려다 또 실패하는 무한 반복에 빠진다.
-    429(과다 요청)는 텔레그램이 알려주는 시간만큼 기다렸다 한 번 재시도한다."""
+    429(과다 요청)는 텔레그램이 알려주는 시간만큼 기다렸다 한 번 재시도한다.
+    반환값: 처리 끝(성공했거나 재시도해도 소용없는 메시지)이면 True, 재시도할 가치가 있는
+    실패면 False. chat 을 주면 TG_CHAT 대신 그 채팅으로 보낸다(점검 알림용)."""
     # link_preview_options.prefer_small_media: 미리보기는 유지하되 카드 크기를 줄인다
     # (구버전 disable_web_page_preview 대체 — 새 API 필드).
     link_preview = {"is_disabled": not preview}
     if preview:
         link_preview["prefer_small_media"] = True
-    data = json.dumps({"chat_id": os.environ["TG_CHAT"], "text": msg,
+    data = json.dumps({"chat_id": chat or os.environ["TG_CHAT"], "text": msg,
                        "parse_mode": "HTML",
                        "link_preview_options": link_preview}).encode()
     url = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/sendMessage"
@@ -692,7 +721,7 @@ def send(msg, preview=True):
                 time.sleep(min(wait, 30))
                 continue
             print(f"  텔레그램 발송 실패 {e.code}: {body[:200]}")
-            return False
+            return e.code == 400 and is_permanent_send_error(body)
         except Exception as e:
             print(f"  텔레그램 발송 실패(네트워크): {e}")
             return False
@@ -715,9 +744,24 @@ def main():
     # 있다. desc·press 없이(빈 문자열로) 5개짜리 [kw, title, link, desc, press]로 맞춘다.
     state["digest"] = [d + [""] * (5 - len(d)) for d in state["digest"]]
     first_run = not seen  # 빈 목록도 첫 실행. 있으나 마나 한 파일에 속아 전체를 발송하지 않는다
+    if first_run:
+        # 캐시가 사라지면 매 실행이 조용히 "기록만" 하며 성공으로 찍힌다(실제로 12시간 무발송
+        # 사고가 났다). Actions 실행 화면에 경고를 남기고, 점검 채팅이 있으면 알린다.
+        # 상태가 없는 상황이라 시각으로 시간당 1회(실행 주기 2분 → 매시 0~1분대)로 제한한다.
+        warn = "저장된 상태(seen.json)가 없어 이번 실행은 기록만 하고 발송하지 않는다 — 캐시 소실이 반복되면 점검 필요"
+        print(f"::warning::{warn}")
+        if os.environ.get("TG_ALERT_CHAT") and datetime.now(KST).minute < 2:
+            send(f"⚠️ 뉴스봇: {warn}", chat=os.environ["TG_ALERT_CHAT"])
     known, fresh, queue = set(seen), [], []
+    search_failed = 0
     for kw in KEYWORDS:
-        for title, link, desc in search(kw):
+        try:
+            results = search(kw)
+        except Exception as e:  # 한 키워드의 일시 오류가 이번 실행 전체를 날리지 않게 한다
+            search_failed += 1
+            print(f"  검색 실패 [{kw}] ({type(e).__name__}: {e}) — 다음 실행에서 다시 시도")
+            continue
+        for title, link, desc in results:
             if link in known:
                 continue
             known.add(link)
@@ -781,6 +825,9 @@ def main():
             queue.append((press_rank(press), title, press, link,
                          shorten_quote(kw, quote_for(kw, paras)), body_all))
 
+    if search_failed == len(KEYWORDS):  # 키 만료·네이버 장애 — 조용한 "성공" 대신 실패로 드러낸다
+        raise SystemExit("모든 키워드 검색 실패 — NAVER_ID/SECRET 과 네이버 API 상태 확인")
+
     keep, state["topics"] = pick_by_press(queue, state["topics"])
     for i, (rank, title, *_) in enumerate(queue):
         if i not in keep:
@@ -791,9 +838,11 @@ def main():
         print(f"발송 대상 {len(queue)}건 — {MAX_BURST}건을 넘어 발송을 건너뛰고 기록만 한다.")
         print("(키워드를 추가했다면 정상. 다음 실행부터 새 기사만 발송된다)")
         queue = []
+    pending = {link: body for _, _, _, link, _, body in queue}  # 아직 못 보낸 것
     try:
-        for _, title, press, link, quote, _ in reversed(queue):  # 오래된 것부터
-            send(format_msg(press, title, link, quote))
+        for _, title, press, link, quote, body in reversed(queue):  # 오래된 것부터
+            if send(format_msg(press, title, link, quote)):
+                pending.pop(link, None)
         if os.environ.get("FORCE_DIGEST", "").lower() == "true" and state.get("slot"):
             # 지금 슬롯을 "아직 처리 안 한 것"으로 되돌려서 flush_digest 가 다시 보내게 한다.
             state["slot"] = (datetime.fromisoformat(state["slot"]) - timedelta(hours=1)).isoformat()
@@ -802,10 +851,17 @@ def main():
         state = check_workers2016(state)
     finally:
         # 위에서 무슨 일이 있었든(네트워크 오류 등) 여기까지는 항상 실행돼
-        # 이미 보낸 것/처리한 것이 다음 실행에서 중복되지 않게 한다.
+        # 이미 보낸 것/처리한 것이 다음 실행에서 중복되지 않게 한다. 단, 보내지 못한 기사는
+        # 기록하지 않아야 다음 실행에서 다시 시도된다(예외로 중간에 끊겨도 pending 에 남는다).
+        fresh, state["topics"] = forget_failed(fresh, state["topics"], list(pending.items()))
         STATE.write_text(json.dumps(state, ensure_ascii=False))
         SEEN.write_text(json.dumps((fresh + seen)[:KEEP], ensure_ascii=False))
-    print(f"새 기사 {len(fresh)}건 / " + ("저장만 (첫 실행)" if first_run else f"발송 {len(queue)}건"))
+    if pending:
+        print(f"발송 실패 {len(pending)}건 — 기록하지 않았으니 다음 실행에서 다시 시도한다")
+    print(f"새 기사 {len(fresh)}건 / " + ("저장만 (첫 실행)" if first_run
+          else f"발송 {len(queue) - len(pending)}건"))
+    if queue and len(pending) == len(queue):  # 전부 실패 = 토큰·채널·네트워크 문제 — 성공으로 덮지 않는다
+        raise SystemExit(f"발송 전부 실패({len(queue)}건) — TG_TOKEN/TG_CHAT 과 텔레그램 상태 확인")
 
 
 def chatid():
@@ -1012,6 +1068,22 @@ def selftest():
     assert is_entertainment_title("넷플릭스 신작 드라마 개봉…시청률 고공행진")
     assert not is_entertainment_title("유모차 출근하던 용혜인, '아이돌봄 지원'엔 반대표")
     assert not is_urgent("넷플릭스 신작 드라마서 성소수자 캐릭터 논란")  # 연예 기사는 비긴급
+    # 발송 실패 처리: 메시지 자체 문제만 포기하고, 나머지는 재시도 대상으로 남긴다
+    assert is_permanent_send_error('{"description":"Bad Request: can\'t parse entities: Unsupported start tag"}')
+    assert not is_permanent_send_error('{"description":"Bad Request: chat not found"}')
+    f, t = forget_failed(["a", "b", "c"], [["본문A", 0], ["본문B", 1]], [("b", "본문B")])
+    assert f == ["a", "c"] and t == [["본문A", 0]]  # 못 보낸 기사는 seen·사안 목록에서 빠진다
+    # 모아보기 발송이 전부 실패하면 비우지 않고(사안 목록도 되돌려) 다음 실행이 재시도한다
+    now_k = datetime.now(KST)
+    st = {"slot": (slot(now_k) - timedelta(hours=DIGEST_HOURS)).isoformat(), "topics": [],
+          "digest": [["녹색당", "녹색당 기후정의 행진", "http://a.invalid/1", "녹색당이 행진했다", "언론사"]]}
+    real_send = globals()["send"]
+    globals()["send"] = lambda *a, **k: False
+    try:
+        st2 = flush_digest(st, now_k)
+    finally:
+        globals()["send"] = real_send
+    assert len(st2["digest"]) == 1 and st2["topics"] == []
     # 해외 정당 소개 기사처럼 "녹색당"이 2~3회만 나오면 국가명 제외를 뚫으면 안 된다
     assert excluded("녹색당", "英 정치 뒤흔드는 사회주의",
                      ["영국 진보 정당 녹색당의 대표는...", "녹색당은 지방선거에서도 돌풍을..."])
