@@ -276,6 +276,7 @@ QUOTE_MAX = 700
 # ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
 # 한 번에 이만큼 넘으면 발송을 건너뛰고 기록만 한다 (첫 실행과 같은 처리).
 MAX_BURST = 30
+SEARCH_FAIL_STREAK = 3  # 검색이 연속 이만큼 실패하면 이번 실행의 검색을 접는다
 # 네이버 검색이 sort=date 라도 재인덱싱된 옛날 기사가 최상단에 다시 뜰 때가 있다
 # (예: pubDate 7주 전 기사가 오늘 처음 잡힘). URL 기반 dedup만으론 "새 기사"로 오인해
 # 발송한다 — pubDate 자체가 이만큼 오래됐으면 발송하지 않고 조용히 버린다.
@@ -753,14 +754,22 @@ def main():
         if os.environ.get("TG_ALERT_CHAT") and datetime.now(KST).minute < 2:
             send(f"⚠️ 뉴스봇: {warn}", chat=os.environ["TG_ALERT_CHAT"])
     known, fresh, queue = set(seen), [], []
-    search_failed = 0
+    search_ok = search_failed = streak = 0
     for kw in KEYWORDS:
+        if streak >= SEARCH_FAIL_STREAK:
+            # 네이버가 통째로 막힌 것 — 키워드마다 20초씩 기다리면 한 실행이 7분을 먹고 뒤 실행들이
+            # 줄줄이 취소된다(실제로 그랬다). 남은 키워드는 다음 실행으로 미룬다.
+            print(f"  연속 {streak}회 검색 실패 — 이번 실행의 나머지 검색은 건너뛴다")
+            break
         try:
             results = search(kw)
         except Exception as e:  # 한 키워드의 일시 오류가 이번 실행 전체를 날리지 않게 한다
             search_failed += 1
+            streak += 1
             print(f"  검색 실패 [{kw}] ({type(e).__name__}: {e}) — 다음 실행에서 다시 시도")
             continue
+        search_ok += 1
+        streak = 0
         for title, link, desc in results:
             if link in known:
                 continue
@@ -825,8 +834,8 @@ def main():
             queue.append((press_rank(press), title, press, link,
                          shorten_quote(kw, quote_for(kw, paras)), body_all))
 
-    if search_failed == len(KEYWORDS):  # 키 만료·네이버 장애 — 조용한 "성공" 대신 실패로 드러낸다
-        raise SystemExit("모든 키워드 검색 실패 — NAVER_ID/SECRET 과 네이버 API 상태 확인")
+    if search_failed and not search_ok:  # 키 만료·네이버 장애 — 조용한 "성공" 대신 실패로 드러낸다
+        raise SystemExit("시도한 키워드 검색이 전부 실패 — NAVER_ID/SECRET 과 네이버 API 상태 확인")
 
     keep, state["topics"] = pick_by_press(queue, state["topics"])
     for i, (rank, title, *_) in enumerate(queue):
