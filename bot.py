@@ -582,7 +582,16 @@ def parse_workers2016(page):
             continue
         content = tm.group(1)
         lm = re.match(r'\s*<a href="([^"]+)"[^>]*>[^<]*</a>\s*<br\s*/?>\s*(.*)', content, re.S)
-        link, rest = (lm.group(1), lm.group(2)) if lm else (post_url, content)
+        # 요즘 글은 링크가 앞이 아니라 끝의 "전문보기 | URL" 줄에 있다 — 그 줄은 떼어내고 링크로 쓴다.
+        fm = None if lm else re.search(
+            r'(?:<br\s*/?>\s*)*(?:<b>\s*전문보기\s*</b>\s*\|\s*)?<a href="([^"]+)"[^>]*>[^<]*</a>\s*$',
+            content, re.S)
+        if lm:
+            link, rest = lm.group(1), lm.group(2)
+        elif fm:
+            link, rest = fm.group(1), content[:fm.start()]
+        else:
+            link, rest = post_url, content
         tm2 = re.match(r'\s*<b>(.*?)</b>\s*<br\s*/?>\s*<br\s*/?>\s*(.*)', rest, re.S)
         if tm2:
             title, body = _clean_tag(tm2.group(1)), _clean_tag(tm2.group(2), keep_breaks=True)
@@ -594,9 +603,21 @@ def parse_workers2016(page):
     return out
 
 
-def check_workers2016(state):
+def norm_link(url):
+    """같은 기사를 가리키는 링크를 같게 본다 — http/https·www·끝 슬래시 차이는 무시한다.
+    (네이버 검색은 newscham.net/130044/ 로, 참세상 채널은 www.newscham.net/130044/ 로 줘서
+    같은 기사가 두 번 나갔다.)"""
+    u = urllib.parse.urlparse(url)
+    return u.netloc.lower().removeprefix("www.") + u.path.rstrip("/") + (f"?{u.query}" if u.query else "")
+
+
+def check_workers2016(state, known_norm=None, fresh=None):
     """새 글이 있으면 하우스 스타일(제목 볼드+하이퍼링크, 본문 인용구)로 전달하고,
-    마지막으로 본 글 번호를 state 에 남긴다. 채널 글 자체 링크(t.me/...)는 보내지 않는다."""
+    마지막으로 본 글 번호를 state 에 남긴다. 채널 글 자체 링크(t.me/...)는 보내지 않는다.
+    known_norm(이미 보낸/본 기사의 norm_link 집합)에 있는 기사는 네이버 검색 경로가 먼저 보낸
+    것이니 건너뛰고, 새로 보낸 기사는 known_norm·fresh 에 올려 반대 방향 중복도 막는다."""
+    known_norm = set() if known_norm is None else known_norm
+    fresh = [] if fresh is None else fresh
     try:
         req = urllib.request.Request(WORKERS2016_URL, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -612,9 +633,15 @@ def check_workers2016(state):
     new = sorted((i, t, l, b) for i, t, l, b in posts if i > last and (t or b))
     done = 0
     for i, title, link, body in new:
+        if norm_link(link) in known_norm:
+            print(f"  워커스2016 중복(이미 보낸 기사) 건너뜀: {title[:30]}")
+            state["workers2016_last"] = i
+            continue
         if not send(format_msg("참세상", title, link, shorten_quote("참세상", body))):
             break  # 실패한 글부터 다음 실행에서 순서대로 다시 시도한다
         state["workers2016_last"] = i
+        known_norm.add(norm_link(link))
+        fresh.append(link)
         done += 1
     if new:
         print(f"워커스2016 {done}/{len(new)}건 전달")
@@ -754,6 +781,7 @@ def main():
         if os.environ.get("TG_ALERT_CHAT") and datetime.now(KST).minute < 2:
             send(f"⚠️ 뉴스봇: {warn}", chat=os.environ["TG_ALERT_CHAT"])
     known, fresh, queue = set(seen), [], []
+    known_norm = {norm_link(l) for l in known}  # http/https·www·슬래시만 다른 같은 링크도 같게 본다
     search_ok = search_failed = streak = 0
     for kw in KEYWORDS:
         if streak >= SEARCH_FAIL_STREAK:
@@ -771,9 +799,10 @@ def main():
         search_ok += 1
         streak = 0
         for title, link, desc in results:
-            if link in known:
+            if link in known or norm_link(link) in known_norm:
                 continue
             known.add(link)
+            known_norm.add(norm_link(link))
             fresh.append(link)
             if first_run or is_ent_sports(link):
                 continue  # 순수 연예·스포츠 기사는 보내지 않는다
@@ -857,7 +886,7 @@ def main():
             state["slot"] = (datetime.fromisoformat(state["slot"]) - timedelta(hours=1)).isoformat()
             print("FORCE_DIGEST — 이번 구간 모아보기를 다시 발송한다")
         state = flush_digest(state, datetime.now(KST))
-        state = check_workers2016(state)
+        state = check_workers2016(state, known_norm, fresh)
     finally:
         # 위에서 무슨 일이 있었든(네트워크 오류 등) 여기까지는 항상 실행돼
         # 이미 보낸 것/처리한 것이 다음 실행에서 중복되지 않게 한다. 단, 보내지 못한 기사는
@@ -1093,6 +1122,28 @@ def selftest():
     finally:
         globals()["send"] = real_send
     assert len(st2["digest"]) == 1 and st2["topics"] == []
+    # 참세상: 끝의 "전문보기 | URL" 형식에서 실제 기사 링크를 뽑고 그 줄은 본문에서 뗀다
+    wpage = ('<div data-post="workers2016/9"><div class="tgme_widget_message_text js-message_text">'
+             '<b>제목입니다</b><br/><br/>본문입니다<br/><br/><b>전문보기</b> | '
+             '<a href="https://www.newscham.net/1/" target="_blank">https://www.newscham.net/1/</a></div></div>')
+    assert parse_workers2016(wpage) == [(9, "제목입니다", "https://www.newscham.net/1/", "본문입니다")]
+    assert norm_link("https://www.newscham.net/130044/") == norm_link("http://newscham.net/130044")
+    assert norm_link("https://n.news.naver.com/mnews/article/1/2?sid=102") != norm_link("https://n.news.naver.com/mnews/article/1/3?sid=102")
+    # 네이버 검색 경로가 이미 보낸 참세상 기사는 채널 경로가 다시 보내지 않고(번호는 전진), 새 기사는 보낸다
+    import tempfile
+    tf = pathlib.Path(tempfile.mkdtemp()) / "ch.html"
+    tf.write_text(wpage)
+    real_url, sent_msgs = WORKERS2016_URL, []
+    globals()["WORKERS2016_URL"] = tf.as_uri()
+    globals()["send"] = lambda m, preview=True, chat=None: (sent_msgs.append(m), True)[1]
+    try:
+        st3 = check_workers2016({"workers2016_last": 8}, {norm_link("https://newscham.net/1/")}, [])
+        assert sent_msgs == [] and st3["workers2016_last"] == 9
+        kn, fr = set(), []
+        st4 = check_workers2016({"workers2016_last": 8}, kn, fr)
+        assert len(sent_msgs) == 1 and fr == ["https://www.newscham.net/1/"] and norm_link(fr[0]) in kn
+    finally:
+        globals()["WORKERS2016_URL"], globals()["send"] = real_url, real_send
     # 해외 정당 소개 기사처럼 "녹색당"이 2~3회만 나오면 국가명 제외를 뚫으면 안 된다
     assert excluded("녹색당", "英 정치 뒤흔드는 사회주의",
                      ["영국 진보 정당 녹색당의 대표는...", "녹색당은 지방선거에서도 돌풍을..."])
