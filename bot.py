@@ -3,6 +3,7 @@
 import html, json, os, pathlib, re, socket, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
 import functools
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from email.utils import parsedate_to_datetime
 
@@ -495,6 +496,23 @@ def site_name(link):
     return html.unescape(m.group(1)).strip() if m else ""
 
 
+def prefetch_articles(links, workers=6):
+    """{링크: (언론사, 문단들)} — 네이버 기사 페이지를 병렬로 미리 읽는다. 러너에서는 네이버 응답이 느려
+    (실측: 호출 48번 중 18번이 타임아웃, 합 495초) 한 건씩 읽으면 한 실행이 9분까지 갔다. 그동안 완료되는
+    실행이 줄어 실행당 새 기사가 늘고 더 느려지는 악순환이었다. 느린 호출은 겹쳐서 기다리면 된다."""
+    links = list(links)
+    if not links:
+        return {}
+
+    def get(link):
+        try:
+            return article(link)
+        except Exception:
+            return "", []
+    with ThreadPoolExecutor(workers) as ex:
+        return dict(zip(links, ex.map(get, links)))
+
+
 @timed("참세상본문", failed=lambda r: not r)
 def trusted_paras(link):
     """네이버에 안 실리는 신뢰 매체(참세상) 기사의 본문 문단들 — 사안 중복 비교용. 본문을 못
@@ -904,6 +922,7 @@ def main():
     known_norm = {norm_link(l) for l in known}  # http/https·www·슬래시만 다른 같은 링크도 같게 본다
     retry_prev, retry_now = state.get("article_retry", {}), {}  # 기사 페이지를 못 읽어 미룬 것들
     search_ok = search_failed = streak = 0
+    found = []  # [(키워드, 검색 결과)] — 먼저 다 모아야 기사 페이지를 병렬로 미리 읽을 수 있다
     for kw in KEYWORDS:
         if time.time() - t_start > RUN_BUDGET:
             print(f"  실행 시간 {RUN_BUDGET}초 초과 — 남은 키워드는 다음 실행에서 처리한다")
@@ -922,6 +941,18 @@ def main():
             continue
         search_ok += 1
         streak = 0
+        found.append((kw, results))
+    pages = {}
+    if not first_run:
+        pages = prefetch_articles({
+            link for _, res in found for title, link, desc in res
+            if "n.news.naver.com" in link and link not in known and norm_link(link) not in known_norm
+            and not is_ent_sports(link) and not is_business_noise(title + desc)
+            and not is_photo_title(title) and not is_schedule_title(title)})
+    for kw, results in found:
+        if time.time() - t_start > RUN_BUDGET:
+            print(f"  실행 시간 {RUN_BUDGET}초 초과 — 남은 키워드는 다음 실행에서 처리한다")
+            break
         for title, link, desc in results:
             if link in known or norm_link(link) in known_norm:
                 continue
@@ -961,7 +992,7 @@ def main():
                 # 쓰고 인용구 없이 즉시 보낸다(예전부터의 형식).
                 press, paras = trusted_press, trusted_paras(link)
             else:
-                press, paras = article(link)
+                press, paras = pages[link] if link in pages else article(link)
                 if not press:
                     # 언론사를 모르면 차단·경제지·진보언론 필터가 전부 꺼지고 본문도 없어 중복 비교도
                     # 약해진다(실측: 발송 기사의 약 10%가 이렇게 나가 TV조선·경제지까지 새 나갔다).
@@ -1248,6 +1279,19 @@ def selftest():
     assert now - parsedate_to_datetime("Mon, 01 Jan 2026 00:00:00 +0900") > FRESH_MAX_AGE
     assert now - parsedate_to_datetime(now.strftime("%a, %d %b %Y %H:%M:%S +0000")) <= FRESH_MAX_AGE
     assert is_photo_title("[포토] 국회 앞 기자회견") and is_photo_title("[화보] 촛불 행렬")
+    # 기사 페이지 병렬 선읽기: 느린 호출을 겹쳐서 기다린다. 한 건의 예외가 나머지를 막지 않는다.
+    _o_article = globals()["article"]
+    def _slow_article(l):
+        time.sleep(0.2)
+        if l == "bad": raise ValueError("boom")
+        return "언론사", [l]
+    globals()["article"] = _slow_article
+    try:
+        _t0 = time.time()
+        _pre = prefetch_articles([f"l{i}" for i in range(12)] + ["bad"])
+        assert time.time() - _t0 < 1.2 and _pre["l5"] == ("언론사", ["l5"]) and _pre["bad"] == ("", [])  # 직렬이면 2.6초
+    finally:
+        globals()["article"] = _o_article
     # Gemini 가 연속 실패하면 그 실행에선 더 부르지 않는다(실행 시간 폭주 방지)
     _calls, _o_open, _o_sleep = [], urllib.request.urlopen, time.sleep
     def _boom(*a, **k): _calls.append(1); raise TimeoutError("timed out")
