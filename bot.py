@@ -122,13 +122,20 @@ def stats_line(total):
     return f"총 {total:.0f}초 | " + " | ".join(parts)
 
 
+GEMINI_FAIL_LIMIT = 2  # 연속 이만큼 실패하면 이번 실행에서는 Gemini 를 더 부르지 않는다
+_gemini_fails = [0]
+
+
 @timed("Gemini", failed=lambda r: r is None)
 def _call_gemini(prompt, max_tokens=5):
     """공통 Gemini 호출. 키가 없거나 실패하면 None. 무슨 에러든(429·타임아웃 등)
     한 번은 쉬었다가 다른 모델로 재시도한다 — 타임아웃은 재시도 없이 바로 포기하던
     버그가 있었다. 호출자가 실패 시 어떻게 할지(통과/자르기 등) 정한다."""
     key = os.environ.get("GEMINI_API_KEY")
-    if not key:
+    if not key or _gemini_fails[0] >= GEMINI_FAIL_LIMIT:
+        # 러너에서 Gemini 가 막히면 한 호출이 최대 ~68초(타임아웃 30초×2+대기)이고 후보마다·모아보기
+        # 점검마다 부르니 실행이 몇 분~몇십 분으로 늘어, 뒤 실행이 전부 취소되며 채널이 멈춘다.
+        # 연속 실패하면 그 실행은 AI 판정 없이 진행한다(실패 시 통과가 원래 방침).
         return None
     body = json.dumps({"contents": [{"parts": [{"text": prompt}]}],
                        "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0}}).encode()
@@ -141,6 +148,7 @@ def _call_gemini(prompt, max_tokens=5):
                                           headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=30) as r:  # 15초는 자주 타임아웃됐다
                 data = json.load(r)
+            _gemini_fails[0] = 0
             return data["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as e:
             reason = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
@@ -149,6 +157,9 @@ def _call_gemini(prompt, max_tokens=5):
                 time.sleep(5)
                 continue
             print(f"  Gemini 호출 실패({model}, {reason}, 재시도도 실패)")
+            _gemini_fails[0] += 1
+            if _gemini_fails[0] >= GEMINI_FAIL_LIMIT:
+                print(f"  Gemini 연속 {GEMINI_FAIL_LIMIT}회 실패 — 이번 실행은 AI 판정 없이 진행한다")
             return None
     return None
 
@@ -322,6 +333,7 @@ QUOTE_MAX = 700
 # ponytail: 키워드를 추가하면 그 키워드의 과거 기사가 통째로 "새 기사"가 된다.
 # 한 번에 이만큼 넘으면 발송을 건너뛰고 기록만 한다 (첫 실행과 같은 처리).
 MAX_BURST = 30
+RUN_BUDGET = 200  # 초. 넘으면 남은 키워드는 다음 실행으로 미룬다(기록 안 한 것은 다음에 다시 잡힌다)
 SEARCH_FAIL_STREAK = 3  # 검색이 연속 이만큼 실패하면 이번 실행의 검색을 접는다
 # 네이버 검색이 sort=date 라도 재인덱싱된 옛날 기사가 최상단에 다시 뜰 때가 있다
 # (예: pubDate 7주 전 기사가 오늘 처음 잡힘). URL 기반 dedup만으론 "새 기사"로 오인해
@@ -893,6 +905,9 @@ def main():
     retry_prev, retry_now = state.get("article_retry", {}), {}  # 기사 페이지를 못 읽어 미룬 것들
     search_ok = search_failed = streak = 0
     for kw in KEYWORDS:
+        if time.time() - t_start > RUN_BUDGET:
+            print(f"  실행 시간 {RUN_BUDGET}초 초과 — 남은 키워드는 다음 실행에서 처리한다")
+            break
         if streak >= SEARCH_FAIL_STREAK:
             # 네이버가 통째로 막힌 것 — 키워드마다 20초씩 기다리면 한 실행이 7분을 먹고 뒤 실행들이
             # 줄줄이 취소된다(실제로 그랬다). 남은 키워드는 다음 실행으로 미룬다.
@@ -1233,6 +1248,19 @@ def selftest():
     assert now - parsedate_to_datetime("Mon, 01 Jan 2026 00:00:00 +0900") > FRESH_MAX_AGE
     assert now - parsedate_to_datetime(now.strftime("%a, %d %b %Y %H:%M:%S +0000")) <= FRESH_MAX_AGE
     assert is_photo_title("[포토] 국회 앞 기자회견") and is_photo_title("[화보] 촛불 행렬")
+    # Gemini 가 연속 실패하면 그 실행에선 더 부르지 않는다(실행 시간 폭주 방지)
+    _calls, _o_open, _o_sleep = [], urllib.request.urlopen, time.sleep
+    def _boom(*a, **k): _calls.append(1); raise TimeoutError("timed out")
+    urllib.request.urlopen, time.sleep = _boom, lambda x: None
+    os.environ["GEMINI_API_KEY"], _gemini_fails[0] = "k", 0
+    try:
+        assert _call_gemini("x") is None and _call_gemini("x") is None and len(_calls) == 4  # 호출당 2회 시도
+        assert _gemini_fails[0] == GEMINI_FAIL_LIMIT
+        assert _call_gemini("x") is None and len(_calls) == 4  # 세 번째부터는 네트워크를 건드리지 않는다
+        assert is_relevant("녹색당", "제목", "요약") is True  # 실패 시 통과
+    finally:
+        urllib.request.urlopen, time.sleep = _o_open, _o_sleep
+        os.environ.pop("GEMINI_API_KEY", None); _gemini_fails[0] = 0
     assert is_schedule_title("[오늘의 국회일정] (11일, 수)") and is_schedule_title("[오늘의 주요일정·11일] 이용철 법무장관 후보자")
     assert is_schedule_title("[이시각헤드라인] 8월 31일 뉴스리뷰") and not is_schedule_title("與박주민 '포괄적 차별금지' 법안 내일 발의")
     assert spurious("평등법", "남녀고용평등법 개정안 국회 통과") and not spurious("평등법", "박주민, 평등법(차별금지법) 발의")

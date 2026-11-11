@@ -15,6 +15,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 8  # 멈춘 실행이 concurrency 대기열을 막아 채널 전체가 서지 않게 (기본값은 6시간)
     steps:
       - uses: actions/checkout@v4
       # ponytail: seen.json 을 커밋하는 대신 캐시로 넘긴다. 5분 주기면 커밋이 월 8천 건.
