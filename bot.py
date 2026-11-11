@@ -2,6 +2,7 @@
 """네이버 뉴스 검색(최신순) → 새 기사만 텔레그램 채널로 발송."""
 import html, json, os, pathlib, re, socket, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
+import functools
 from functools import lru_cache
 from email.utils import parsedate_to_datetime
 
@@ -91,6 +92,37 @@ def _pace_gemini():
     _last_gemini_call[0] = time.time()
 
 
+STATS = {}  # 이름 → [호출 수, 실패 수, 걸린 초]
+
+
+def timed(name, failed=lambda r: False):
+    """호출 수·실패 수·시간을 센다. Actions 로그는 인증 없이 못 읽지만 어노테이션은 읽을 수 있어서,
+    실행 끝에 이 요약을 ::notice:: 로 남겨 "어느 단계가 느린가"를 밖에서 볼 수 있게 한다."""
+    def deco(f):
+        @functools.wraps(f)
+        def g(*a, **k):
+            st = STATS.setdefault(name, [0, 0, 0.0])
+            t0 = time.time()
+            st[0] += 1
+            try:
+                r = f(*a, **k)
+            except Exception:
+                st[1] += 1
+                raise
+            finally:
+                st[2] += time.time() - t0
+            st[1] += bool(failed(r))
+            return r
+        return g
+    return deco
+
+
+def stats_line(total):
+    parts = [f"{n} {c}회/실패{x}/{sec:.0f}초" for n, (c, x, sec) in STATS.items()]
+    return f"총 {total:.0f}초 | " + " | ".join(parts)
+
+
+@timed("Gemini", failed=lambda r: r is None)
 def _call_gemini(prompt, max_tokens=5):
     """공통 Gemini 호출. 키가 없거나 실패하면 None. 무슨 에러든(429·타임아웃 등)
     한 번은 쉬었다가 다른 모델로 재시도한다 — 타임아웃은 재시도 없이 바로 포기하던
@@ -318,6 +350,7 @@ def clean(s):
     return html.unescape(re.sub(r"<[^>]+>", "", s)).strip()
 
 
+@timed("검색")
 def search(kw):
     q = urllib.parse.urlencode({"query": kw, "display": 30, "sort": "date", "format": "json"})
     # NCP(NAVER API HUB) 발급 키. developers.naver.com 키를 쓸 거면
@@ -405,6 +438,7 @@ def tidy(para):
     return para
 
 
+@timed("기사", failed=lambda r: not r[0])
 def article(link):
     """(언론사, 본문 문단들). 언론사 원문 링크는 형식이 제각각이라 포기하고 빈 값."""
     if "n.news.naver.com" not in link:
@@ -412,7 +446,7 @@ def article(link):
     for attempt in range(2):  # 일시 오류(타임아웃·차단)가 흔해 한 번 더 시도한다
         try:
             req = urllib.request.Request(link, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 page = r.read().decode("utf-8", "replace")
             break
         except Exception:
@@ -449,6 +483,7 @@ def site_name(link):
     return html.unescape(m.group(1)).strip() if m else ""
 
 
+@timed("참세상본문", failed=lambda r: not r)
 def trusted_paras(link):
     """네이버에 안 실리는 신뢰 매체(참세상) 기사의 본문 문단들 — 사안 중복 비교용. 본문을 못
     읽어 제목+요약만 비교하던 때는 같은 사안이 앞뒤 어느 쪽으로도 안 묶여 중복이 새 나갔다
@@ -773,6 +808,7 @@ def forget_failed(fresh, topics, failed):
 CHANNEL_PREVIEW_URL = "https://t.me/s/greenpolitics_news"  # 공개 채널의 로그인 없는 미리보기 페이지
 
 
+@timed("채널확인", failed=lambda r: not r)
 def recent_channel_links():
     """채널 최근 글에 이미 걸린 링크(norm_link 집합). Actions 캐시는 방금 저장한 게 바로 다음 실행에
     안 보일 수 있어서, 같은 기사가 1분 간격으로 두 번 나간 적이 있다. 채널 자체가 "이미 보낸 것"의
@@ -789,6 +825,7 @@ def recent_channel_links():
     return links
 
 
+@timed("발송", failed=lambda r: not r)
 def send(msg, preview=True, chat=None):
     """실패해도 죽지 않는다 — 여기서 죽으면 그 아래의 상태 저장이 안 돌아서,
     다음 실행이 같은 항목을 다시 보내려다 또 실패하는 무한 반복에 빠진다.
@@ -825,6 +862,7 @@ def send(msg, preview=True, chat=None):
 
 
 def main():
+    t_start = time.time()
     # 시크릿이 없으면 GitHub 는 빈 문자열을 넘긴다. 조용히 성공하는 대신 여기서 죽는다.
     missing = [k for k in ("NAVER_ID", "NAVER_SECRET", "TG_TOKEN", "TG_CHAT") if not os.environ.get(k)]
     if not KEYWORDS:
@@ -980,6 +1018,9 @@ def main():
         state = flush_digest(state, datetime.now(KST))
         state = check_workers2016(state, known_norm, fresh)
     finally:
+        line = stats_line(time.time() - t_start)
+        print(line)
+        print(f"::notice title=실행 시간::{line}")
         # 위에서 무슨 일이 있었든(네트워크 오류 등) 여기까지는 항상 실행돼
         # 이미 보낸 것/처리한 것이 다음 실행에서 중복되지 않게 한다. 단, 보내지 못한 기사는
         # 기록하지 않아야 다음 실행에서 다시 시도된다(예외로 중간에 끊겨도 pending 에 남는다).
