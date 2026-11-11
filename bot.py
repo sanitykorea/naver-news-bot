@@ -2,6 +2,7 @@
 """네이버 뉴스 검색(최신순) → 새 기사만 텔레그램 채널로 발송."""
 import html, json, os, pathlib, re, socket, sys, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from email.utils import parsedate_to_datetime
 
 # ponytail: GitHub Actions 러너에서 구글 API(Gemini)로 가는 IPv6 경로가 간헐적으로
@@ -144,6 +145,15 @@ def is_photo_title(title):
     return bool(PHOTO_TITLE.search(title))
 
 
+# "[오늘의 국회일정]"·"[이시각헤드라인]" 같은 나열형 글. 하루 일정·뉴스를 한 줄씩 늘어놓아서
+# 키워드가 한 줄만 걸려도 통과하는데 기사는 아니다(채널에 이미 나간 적이 있다).
+SCHEDULE_TITLE = re.compile(r"오늘의\s*(주요\s*)?(국회\s*)?(일정|국회)|주요\s*일정|이시각\s*헤드라인|뉴스\s*리뷰")
+
+
+def is_schedule_title(title):
+    return bool(SCHEDULE_TITLE.search(title))
+
+
 URGENT_TITLE = re.compile(r"\[\s*(단독|속보)\s*\]")
 # 오피니언/칼럼 코너명. 대개 "[코너명]" 또는 "[코너명/필자]"로 제목 앞뒤에 붙는다.
 # 모든 매체의 코너명을 다 알 수 없어 자주 보이는 것만 등록하고, "[.../...]"
@@ -223,7 +233,8 @@ EXCLUDE = {"녹색당": ("영국", "英", "런던", "잉글랜드", "스코틀�
            "청소년 스마트폰": ("소송",)}
 # ponytail: 검색어가 더 긴 단어에 먹혀 딸려오는 오탐. 그 긴 단어를 지우고도
 # 검색어가 남아야 진짜 관련 기사다. 위치·빈도와 무관하게 매칭 자체를 본다.
-SWALLOWED_BY = {"차별금지법": ("장애인차별금지법",)}
+# "평등법"은 "남녀고용평등법"(다른 법)·"불평등법"에도 부분 일치로 걸린다.
+SWALLOWED_BY = {"차별금지법": ("장애인차별금지법",), "평등법": ("고용평등법", "불평등법")}
 # ponytail: "녹색당"만 언급되고 실제로는 무관한 기사(예: 인물 소개에 이력으로만 등장)를
 # 거른다. 둘 중 하나면 통과 — (1) 당이 행위자로 등장(제목·리드에 언급) (2) 녹색당이
 # 실제로 다루는 정책 영역과 겹침. 둘 다 아니면 이름만 스친 기사로 보고 제외한다.
@@ -252,6 +263,9 @@ RELEVANCE_CHECK = {
     # "국회 본회의, 36건 법안·결의안 처리"처럼 여러 법안 중 하나로 스치거나,
     # "OO시 기후환경학교 개강" 같은 행정 홍보에 곁다리로 걸리는 사례가 많았다.
     "탄소중립법": (("탄소중립법", "탄소중립기본법"), ()),
+    # 차별금지법의 다른 이름. 입법 일정 나열이나 인물 기사 곁다리로 지나가듯 나오는 경우가 많아
+    # 제목·리드에 직접 나올 때만 받는다.
+    "평등법": (("평등법",), ()),
     # "환경"은 "전략 환경이 어렵다"처럼 생태와 무관한 "상황/여건" 뜻으로도 흔히 쓰이는
     # 동음이의어다. 행위자 개념이 없는 단어라 aliases는 비워두고, 진짜 환경 어휘가
     # 하나라도 같이 나올 때만 통과시킨다.
@@ -294,7 +308,10 @@ PRESS_TIERS = (("경향신문", "한겨레", "프레시안", "오마이뉴스", 
 # 한국어 제목은 어순이 크게 바뀌는 경우가 많아 문자 n-gram보다 단어 단위가 더 잘 갈린다.
 # 실측상 같은 사안 최소 0.11~최대 0.83 / 다른 사안 최대 0.17 이라 0.3 이면 오연결 없이 넉넉하다.
 TOPIC_SIM = 0.3
-TOPICS_KEEP = 300
+TOPICS_KEEP = 800
+TOPIC_TTL = 4 * 24 * 3600  # 이 기간 안에 이미 보낸 사안이면 같은 사안으로 본다(초). 반복 보도되면 계속 연장된다
+TOPIC_TEXT_MAX = 6000      # 기준점으로 저장할 본문 길이 상한(state.json 크기 방어)
+ARTICLE_RETRIES = 5        # 네이버 기사 페이지를 못 읽을 때 이만큼(실행 횟수) 시도하고 포기
 
 
 def clean(s):
@@ -392,12 +409,16 @@ def article(link):
     """(언론사, 본문 문단들). 언론사 원문 링크는 형식이 제각각이라 포기하고 빈 값."""
     if "n.news.naver.com" not in link:
         return "", []
-    try:
-        req = urllib.request.Request(link, headers={"User-Agent": UA})
-        with urllib.request.urlopen(req, timeout=20) as r:
-            page = r.read().decode("utf-8", "replace")
-    except Exception:
-        return "", []
+    for attempt in range(2):  # 일시 오류(타임아웃·차단)가 흔해 한 번 더 시도한다
+        try:
+            req = urllib.request.Request(link, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                page = r.read().decode("utf-8", "replace")
+            break
+        except Exception:
+            if attempt:
+                return "", []
+            time.sleep(1.5)
     # <meta property="og:article:author" content="경향신문 | 네이버">
     a = re.search(r'og:article:author" content="([^"|]+)', page)
     press = html.unescape(a.group(1)).strip() if a else ""
@@ -426,6 +447,28 @@ def site_name(link):
         return ""
     m = re.search(r'og:site_name["\']\s*content=["\']([^"\']+)', page)
     return html.unescape(m.group(1)).strip() if m else ""
+
+
+def trusted_paras(link):
+    """네이버에 안 실리는 신뢰 매체(참세상) 기사의 본문 문단들 — 사안 중복 비교용. 본문을 못
+    읽어 제목+요약만 비교하던 때는 같은 사안이 앞뒤 어느 쪽으로도 안 묶여 중복이 새 나갔다
+    (실측: 중복 쌍 37건이 이 경로). 실패하면 빈 리스트 — 제목+요약 비교로 대신한다."""
+    try:
+        req = urllib.request.Request(link, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            page = r.read().decode("utf-8", "replace")
+    except Exception:
+        return []
+    i = page.find("single-content")  # 참세상: 본문 컨테이너. 없으면 페이지 전체에서 찾는다
+    page = page[i:] if i >= 0 else page
+    out = []
+    for raw in re.findall(r"<p[^>]*>(.*?)</p>", page, re.S):
+        t = tidy(html.unescape(re.sub(r"<[^>]+>", "", raw)).strip())
+        if t.startswith("댓글"):  # 본문 끝(그 뒤는 댓글·다른 기사 목록)
+            break
+        if len(t) > 30 and not PHOTO_CAPTION.search(t):
+            out.append(t)
+    return out
 
 
 def quote_for(kw, paras):
@@ -464,8 +507,9 @@ def press_rank(press):
     return len(PRESS_TIERS)
 
 
-def words(title):
-    return set(re.findall(r"[가-힣A-Za-z0-9]+", title))
+@lru_cache(maxsize=4096)
+def words(title):  # 기준점 수백 개를 후보마다 다시 쪼개지 않게 캐시한다
+    return frozenset(re.findall(r"[가-힣A-Za-z0-9]+", title))
 
 
 def same_topic(a, b):
@@ -477,42 +521,46 @@ def same_topic(a, b):
     return len(A & B) / min(len(A), len(B)) >= TOPIC_SIM
 
 
-def register_topic(rank, title, compare_text, topics):
-    """topics 를 제자리에서 갱신한다(리스트라 호출자에 반영됨). 반환값: 보낼지 여부.
-    같은 사안이 이미 기록돼 있으면, 그보다 더 우선하는 매체가 뒤늦게 나온 경우(등급 격상)
-    나 "[단독]" 표시가 붙은 경우(새 사실관계로 본다)만 통과. 그 외(같은 등급이 또 오는
-    경우 등)는 막는다 — 진보언론이라도 이미 다룬 사안을 계속 반복해서 보내면 피로도만
-    쌓인다. compare_text 는 화면에 보일 제목이 아니라 사안을 판별할 텍스트 — 제목만
-    비교하면 각 언론사가 다른 발언을 인용 제목으로 뽑을 때(예: 같은 행사 발언인데 서로
-    다른 문장을 헤드라인으로 쓰는 경우) 못 묶는다. 본문 전체로 비교하면 실측상 같은 사안
-    최소 0.57 / 무관 기사 최대 0.13으로 확실히 갈린다."""
-    hit = next((t for t in topics if same_topic(compare_text, t[0])), None)
-    if hit is None:
-        topics.insert(0, [compare_text, rank])
+def register_topic(title, compare_text, topics, now):
+    """topics([[본문, 마지막으로 본 시각]])를 제자리에서 갱신한다. 반환값: 보낼지 여부.
+    같은 사안이 이미 기록돼 있으면 막는다 — 매체 등급과 무관하게. 예전엔 "더 우선하는 매체가
+    뒤늦게 나오면 통과"시켰는데, 연합뉴스가 나간 뒤 몇 시간 뒤 한겨레·MBC가 같은 사안을 또
+    보내는 식이라 피로도만 쌓였다(실측: 중복 쌍의 3분의 1). 예외는 "[단독]"(새 사실관계) 뿐.
+    같은 사안의 기준점이 여러 개로 쪼개져 있을 수 있어(앞 기사의 본문이 짧아 못 묶인 경우 등)
+    하나만 보지 않고 걸리는 기준점을 전부 본다. 걸린 기준점은 시각을 갱신해 반복 보도되는
+    동안 잊지 않는다. compare_text 는 화면에 보일 제목이 아니라 사안을 판별할 텍스트 —
+    제목만 비교하면 언론사마다 다른 발언을 헤드라인으로 뽑을 때 못 묶는다. 본문 전체로
+    비교하면 실측상 같은 사안 최소 0.57 / 무관 기사 최대 0.13으로 확실히 갈린다."""
+    hits = [t for t in topics if same_topic(compare_text, t[0])]
+    for t in hits:
+        t[1] = now
+    if not hits:
+        topics.insert(0, [compare_text[:TOPIC_TEXT_MAX], now])
         return True
-    send = rank < hit[1] or "[단독]" in title
-    hit[1] = min(hit[1], rank)
-    return send
+    return "[단독]" in title
 
 
-def pick_by_press(cands, topics):
+def alive_topics(topics, now):
+    return [list(t) for t in topics if now - t[1] < TOPIC_TTL][:TOPICS_KEEP]
+
+
+def pick_by_press(cands, topics, now=None):
     """(보낼 것, 갱신된 사안 목록). cands 는 (rank, title, ..., compare_text) 튜플 —
-    비교는 본문(compare_text, 마지막 요소)으로, 우선순위 판단은 rank(첫 요소)로 한다."""
-    topics = [list(t) for t in topics]
+    비교는 본문(compare_text, 마지막 요소)으로 한다. 한 실행에 같은 사안이 여럿이면 우선 매체
+    (rank 낮은 쪽)부터 판단해 그 하나만 남는다."""
+    now = time.time() if now is None else now
+    topics = alive_topics(topics, now)
     keep = {i for i in sorted(range(len(cands)), key=lambda i: cands[i][0])  # 우선 매체부터 판단
-            if register_topic(cands[i][0], cands[i][1], cands[i][-1], topics)}
+            if register_topic(cands[i][1], cands[i][-1], topics, now)}
     return keep, topics[:TOPICS_KEEP]
 
 
-# 모아보기(언론사 원문 링크)는 어느 매체인지 모른다 — 그 외 매체와 같은 최하위로 취급한다.
-DIGEST_RANK = len(PRESS_TIERS)
-
-
-def dedup_digest(items, topics):
-    """(살아남은 항목들, 갱신된 사안 목록). items 는 [kw, title, link, desc] 리스트.
+def dedup_digest(items, topics, now=None):
+    """(살아남은 항목들, 갱신된 사안 목록). items 는 [kw, title, link, desc, ...] 리스트.
     본문을 못 읽는 경로라 제목+요약으로 비교한다(즉시발송의 본문 비교보다는 약하다)."""
-    topics = [list(t) for t in topics]
-    kept = [it for it in items if register_topic(DIGEST_RANK, it[1], it[1] + " " + it[3], topics)]
+    now = time.time() if now is None else now
+    topics = alive_topics(topics, now)
+    kept = [it for it in items if register_topic(it[1], it[1] + " " + it[3], topics, now)]
     return kept, topics[:TOPICS_KEEP]
 
 
@@ -662,7 +710,8 @@ def flush_digest(state, now):
     # 실패했을 수 있으니 발송 직전 다시 검사한다. 큐에 오래(최대 3시간) 머무는
     # 모아보기라 이 재검사가 없으면 규칙 추가 전에 쌓인 재고가 그대로 나간다.
     items = [i for i in state["digest"]
-              if not is_business_noise(i[1] + i[3]) and not is_photo_title(i[1])]
+              if not is_business_noise(i[1] + i[3]) and not is_photo_title(i[1])
+              and not is_schedule_title(i[1])]
     items = [i for i in items if is_relevant(i[0], i[1], i[3])]
     dropped = len(state["digest"]) - len(items)
     if dropped:
@@ -717,8 +766,27 @@ def forget_failed(fresh, topics, failed):
     """failed: [(link, body_all)] — 보내지 못한 기사. 그대로 두면 "이미 본 것"·"이미 보낸
     사안"으로 기록돼 영영 재시도되지 않으니, seen 목록과 사안 목록에서 빼서 다음 실행이
     새 기사로 다시 시도하게 한다."""
-    links, bodies = {l for l, _ in failed}, {b for _, b in failed}
+    links, bodies = {l for l, _ in failed}, {b[:TOPIC_TEXT_MAX] for _, b in failed}
     return [l for l in fresh if l not in links], [t for t in topics if t[0] not in bodies]
+
+
+CHANNEL_PREVIEW_URL = "https://t.me/s/greenpolitics_news"  # 공개 채널의 로그인 없는 미리보기 페이지
+
+
+def recent_channel_links():
+    """채널 최근 글에 이미 걸린 링크(norm_link 집합). Actions 캐시는 방금 저장한 게 바로 다음 실행에
+    안 보일 수 있어서, 같은 기사가 1분 간격으로 두 번 나간 적이 있다. 채널 자체가 "이미 보낸 것"의
+    정답이니 보내기 직전에 한 번 확인한다. 못 읽으면 빈 집합 — 확인 없이 보낸다(실패 시 열어둔다)."""
+    try:
+        req = urllib.request.Request(CHANNEL_PREVIEW_URL, headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            page = r.read().decode("utf-8", "replace")
+    except Exception:
+        return set()
+    links = set()
+    for text in re.findall(r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', page, re.S):
+        links.update(norm_link(html.unescape(h)) for h in re.findall(r'<a href="(https?://[^"]+)"', text))
+    return links
 
 
 def send(msg, preview=True, chat=None):
@@ -771,6 +839,8 @@ def main():
     # 예전 캐시엔 [kw, title, link] 나 [kw, title, link, desc] 짜리 항목이 남아있을 수
     # 있다. desc·press 없이(빈 문자열로) 5개짜리 [kw, title, link, desc, press]로 맞춘다.
     state["digest"] = [d + [""] * (5 - len(d)) for d in state["digest"]]
+    now_ts = time.time()  # 예전 사안 기록은 [본문, 등급(0~2)] — 등급은 이제 안 쓰니 시각으로 바꾼다
+    state["topics"] = [[t[0], t[1] if t[1] > 1e9 else now_ts] for t in state["topics"]]
     first_run = not seen  # 빈 목록도 첫 실행. 있으나 마나 한 파일에 속아 전체를 발송하지 않는다
     if first_run:
         # 캐시가 사라지면 매 실행이 조용히 "기록만" 하며 성공으로 찍힌다(실제로 12시간 무발송
@@ -782,6 +852,7 @@ def main():
             send(f"⚠️ 뉴스봇: {warn}", chat=os.environ["TG_ALERT_CHAT"])
     known, fresh, queue = set(seen), [], []
     known_norm = {norm_link(l) for l in known}  # http/https·www·슬래시만 다른 같은 링크도 같게 본다
+    retry_prev, retry_now = state.get("article_retry", {}), {}  # 기사 페이지를 못 읽어 미룬 것들
     search_ok = search_failed = streak = 0
     for kw in KEYWORDS:
         if streak >= SEARCH_FAIL_STREAK:
@@ -814,6 +885,9 @@ def main():
             if is_photo_title(title):  # [포토]·[화보] — 사진만 있고 기사 본문은 없다
                 print(f"  제외(포토): {title[:40]}")
                 continue
+            if is_schedule_title(title):  # [오늘의 국회일정] 등 나열형 글
+                print(f"  제외(일정·헤드라인 나열): {title[:40]}")
+                continue
             trusted_press = next((p for d, p in TRUSTED_DOMAINS.items()
                                   if urllib.parse.urlparse(link).netloc.endswith(d)), None)
             if "n.news.naver.com" not in link and not trusted_press:
@@ -830,10 +904,23 @@ def main():
                         print(f"  제외(AI 판단): {title[:40]}")
                 continue
             if trusted_press:
-                # 참세상 등은 네이버에 안 실려 본문을 못 읽는다 — 인용구 없이 즉시 보낸다.
-                press, paras = trusted_press, []
+                # 참세상 등은 네이버에 안 실려 article() 을 못 쓴다 — 본문은 사안 중복 판별에만
+                # 쓰고 인용구 없이 즉시 보낸다(예전부터의 형식).
+                press, paras = trusted_press, trusted_paras(link)
             else:
                 press, paras = article(link)
+                if not press:
+                    # 언론사를 모르면 차단·경제지·진보언론 필터가 전부 꺼지고 본문도 없어 중복 비교도
+                    # 약해진다(실측: 발송 기사의 약 10%가 이렇게 나가 TV조선·경제지까지 새 나갔다).
+                    # 일시 오류니 기록하지 않고 다음 실행에서 다시 시도한다.
+                    n = retry_prev.get(link, 0) + 1
+                    if n < ARTICLE_RETRIES:
+                        retry_now[link] = n
+                        known.discard(link); known_norm.discard(norm_link(link)); fresh.pop()
+                        print(f"  기사 페이지 못 읽음({n}/{ARTICLE_RETRIES}) — 다음 실행에서 재시도: {title[:30]}")
+                    else:
+                        print(f"  기사 페이지 못 읽음 — 포기: {title[:30]}")
+                    continue
             if is_blocked_press(press):  # TV조선·조선일보·주간조선 등 완전 차단
                 print(f"  제외(차단 언론사 {press}): {title[:36]}")
                 continue
@@ -861,8 +948,9 @@ def main():
                 state["digest"].append([kw, title, link, desc, press])
                 continue
             queue.append((press_rank(press), title, press, link,
-                         shorten_quote(kw, quote_for(kw, paras)), body_all))
+                         "" if trusted_press else shorten_quote(kw, quote_for(kw, paras)), body_all))
 
+    state["article_retry"] = retry_now
     if search_failed and not search_ok:  # 키 만료·네이버 장애 — 조용한 "성공" 대신 실패로 드러낸다
         raise SystemExit("시도한 키워드 검색이 전부 실패 — NAVER_ID/SECRET 과 네이버 API 상태 확인")
 
@@ -877,9 +965,13 @@ def main():
         print("(키워드를 추가했다면 정상. 다음 실행부터 새 기사만 발송된다)")
         queue = []
     pending = {link: body for _, _, _, link, _, body in queue}  # 아직 못 보낸 것
+    already = recent_channel_links() if queue else set()
     try:
         for _, title, press, link, quote, body in reversed(queue):  # 오래된 것부터
-            if send(format_msg(press, title, link, quote)):
+            if norm_link(link) in already:
+                print(f"  채널에 이미 있음 — 건너뜀: {title[:30]}")
+                pending.pop(link, None)
+            elif send(format_msg(press, title, link, quote)):
                 pending.pop(link, None)
         if os.environ.get("FORCE_DIGEST", "").lower() == "true" and state.get("slot"):
             # 지금 슬롯을 "아직 처리 안 한 것"으로 되돌려서 flush_digest 가 다시 보내게 한다.
@@ -962,17 +1054,21 @@ def selftest():
     assert same_topic(a, b) and not same_topic(a, c)
     # 한 실행에 같은 사안 3건: 우선 매체 하나만 나간다
     keep, tops = pick_by_press([(2, a), (0, b), (1, a)], [])
-    assert keep == {1} and tops[0][1] == 0
-    # 이미 그 외 매체로 나간 사안 → 진보언론이 뒤늦게 나오면 다시 보낸다
-    keep, tops = pick_by_press([(0, b)], [[a, 2]])
-    assert keep == {0} and tops[0][1] == 0
-    # 통신사·그 외는 같은 등급이 또 오면 안 보낸다
-    assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
-    assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
-    # 진보언론이라도 같은 등급이 이미 같은 사안을 보냈으면 또 보내지 않는다
-    assert pick_by_press([(0, b)], [[a, 0]])[0] == set()
-    # "[단독]" 표시가 붙으면 같은 사안·같은 등급이어도 다시 보낸다
-    assert pick_by_press([(0, "[단독] " + b)], [[a, 0]])[0] == {0}
+    assert keep == {1} and len(tops) == 1
+    # 이미 보낸 사안은 등급과 무관하게 막는다 — 연합뉴스가 나간 뒤 진보언론이 뒤늦게 같은
+    # 사안을 또 보내던 게 피로도의 가장 큰 원인이었다(실측: 중복 쌍의 3분의 1)
+    NOW = 1_000_000_000.0
+    anchors = [[a, NOW]]
+    assert pick_by_press([(0, b)], anchors, NOW + 60)[0] == set()
+    assert pick_by_press([(2, b)], anchors, NOW + 60)[0] == set()
+    # 같은 사안의 기준점이 여러 개로 쪼개져 있어도 하나라도 걸리면 막는다
+    assert pick_by_press([(0, b)], [[c, NOW], [a, NOW]], NOW + 60)[0] == set()
+    # "[단독]" 표시가 붙으면 같은 사안이어도 다시 보낸다
+    assert pick_by_press([(0, "[단독] " + b)], anchors, NOW + 60)[0] == {0}
+    # 기억 기간이 지나면 새 사안으로 본다. 반복 보도되는 동안엔 기억이 계속 연장된다.
+    assert pick_by_press([(0, b)], anchors, NOW + TOPIC_TTL + 1)[0] == {0}
+    _, tops2 = pick_by_press([(1, b)], anchors, NOW + TOPIC_TTL - 10)
+    assert pick_by_press([(1, b)], tops2, NOW + TOPIC_TTL + 100)[0] == set()
     # 실제 사례: 같은 행사인데 언론사마다 다른 발언을 제목으로 뽑아 제목만으로는 안 갈렸다.
     # (rank, title, ..., compare_text) 형태로 넘기면 비교는 마지막 요소(본문)로 한다.
     quotes_same_event = [
@@ -1038,17 +1134,21 @@ def selftest():
     assert same_topic(a, b) and not same_topic(a, c)
     # 한 실행에 같은 사안 3건: 우선 매체 하나만 나간다
     keep, tops = pick_by_press([(2, a), (0, b), (1, a)], [])
-    assert keep == {1} and tops[0][1] == 0
-    # 이미 그 외 매체로 나간 사안 → 진보언론이 뒤늦게 나오면 다시 보낸다
-    keep, tops = pick_by_press([(0, b)], [[a, 2]])
-    assert keep == {0} and tops[0][1] == 0
-    # 통신사·그 외는 같은 등급이 또 오면 안 보낸다
-    assert pick_by_press([(2, b)], [[a, 2]])[0] == set()
-    assert pick_by_press([(1, b)], [[a, 1]])[0] == set()
-    # 진보언론이라도 같은 등급이 이미 같은 사안을 보냈으면 또 보내지 않는다
-    assert pick_by_press([(0, b)], [[a, 0]])[0] == set()
-    # "[단독]" 표시가 붙으면 같은 사안·같은 등급이어도 다시 보낸다
-    assert pick_by_press([(0, "[단독] " + b)], [[a, 0]])[0] == {0}
+    assert keep == {1} and len(tops) == 1
+    # 이미 보낸 사안은 등급과 무관하게 막는다 — 연합뉴스가 나간 뒤 진보언론이 뒤늦게 같은
+    # 사안을 또 보내던 게 피로도의 가장 큰 원인이었다(실측: 중복 쌍의 3분의 1)
+    NOW = 1_000_000_000.0
+    anchors = [[a, NOW]]
+    assert pick_by_press([(0, b)], anchors, NOW + 60)[0] == set()
+    assert pick_by_press([(2, b)], anchors, NOW + 60)[0] == set()
+    # 같은 사안의 기준점이 여러 개로 쪼개져 있어도 하나라도 걸리면 막는다
+    assert pick_by_press([(0, b)], [[c, NOW], [a, NOW]], NOW + 60)[0] == set()
+    # "[단독]" 표시가 붙으면 같은 사안이어도 다시 보낸다
+    assert pick_by_press([(0, "[단독] " + b)], anchors, NOW + 60)[0] == {0}
+    # 기억 기간이 지나면 새 사안으로 본다. 반복 보도되는 동안엔 기억이 계속 연장된다.
+    assert pick_by_press([(0, b)], anchors, NOW + TOPIC_TTL + 1)[0] == {0}
+    _, tops2 = pick_by_press([(1, b)], anchors, NOW + TOPIC_TTL - 10)
+    assert pick_by_press([(1, b)], tops2, NOW + TOPIC_TTL + 100)[0] == set()
     # 실제 사례: 같은 행사인데 언론사마다 다른 발언을 제목으로 뽑아 제목만으로는 안 갈렸다.
     # (rank, title, ..., compare_text) 형태로 넘기면 비교는 마지막 요소(본문)로 한다.
     quotes_same_event = [
@@ -1092,6 +1192,11 @@ def selftest():
     assert now - parsedate_to_datetime("Mon, 01 Jan 2026 00:00:00 +0900") > FRESH_MAX_AGE
     assert now - parsedate_to_datetime(now.strftime("%a, %d %b %Y %H:%M:%S +0000")) <= FRESH_MAX_AGE
     assert is_photo_title("[포토] 국회 앞 기자회견") and is_photo_title("[화보] 촛불 행렬")
+    assert is_schedule_title("[오늘의 국회일정] (11일, 수)") and is_schedule_title("[오늘의 주요일정·11일] 이용철 법무장관 후보자")
+    assert is_schedule_title("[이시각헤드라인] 8월 31일 뉴스리뷰") and not is_schedule_title("與박주민 '포괄적 차별금지' 법안 내일 발의")
+    assert spurious("평등법", "남녀고용평등법 개정안 국회 통과") and not spurious("평등법", "박주민, 평등법(차별금지법) 발의")
+    assert excluded("평등법", "박주민 평등법 발의", ["박주민 의원이 평등법을 발의했다. " * 3]) is None
+    assert excluded("평등법", "미국 의회 암호화폐 세금 제도 개편", ["법안 소개. " * 5, "더 있는 문단 " * 5, "마지막에 평등법이 한 번 언급된다."]) == "접점없음"
     assert not is_photo_title("녹색당 국회 앞 기자회견")
     assert is_opinion_title("[광화문에서/하정민]주요국 정치")  # 코너명/필자 형태
     assert is_opinion_title("[여적]촛불이 남긴 것")
@@ -1128,6 +1233,17 @@ def selftest():
              '<a href="https://www.newscham.net/1/" target="_blank">https://www.newscham.net/1/</a></div></div>')
     assert parse_workers2016(wpage) == [(9, "제목입니다", "https://www.newscham.net/1/", "본문입니다")]
     assert norm_link("https://www.newscham.net/130044/") == norm_link("http://newscham.net/130044")
+    import tempfile as _tf
+    _page = _tf.NamedTemporaryFile("w", suffix=".html", delete=False)
+    _page.write('<div class="tgme_widget_message_text js-message_text"><a href="https://n.news.naver.com/mnews/article/1/2?sid=102"><b>제목</b></a>'
+                '<br/><blockquote>본문 <a href="https://t.me/x">링크</a></blockquote></div>')
+    _page.close()
+    _real_prev = CHANNEL_PREVIEW_URL
+    globals()["CHANNEL_PREVIEW_URL"] = pathlib.Path(_page.name).as_uri()
+    try:
+        assert norm_link("https://n.news.naver.com/mnews/article/1/2?sid=102") in recent_channel_links()
+    finally:
+        globals()["CHANNEL_PREVIEW_URL"] = _real_prev
     assert norm_link("https://n.news.naver.com/mnews/article/1/2?sid=102") != norm_link("https://n.news.naver.com/mnews/article/1/3?sid=102")
     # 네이버 검색 경로가 이미 보낸 참세상 기사는 채널 경로가 다시 보내지 않고(번호는 전진), 새 기사는 보낸다
     import tempfile
