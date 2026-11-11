@@ -94,6 +94,7 @@ def _pace_gemini():
 
 
 STATS = {}  # 이름 → [호출 수, 실패 수, 걸린 초]
+ARTICLE_ERRORS = {}  # 기사 페이지 읽기 실패 사유 → 횟수 (타임아웃인지 429/403인지 어노테이션으로 본다)
 
 
 def timed(name, failed=lambda r: False):
@@ -120,6 +121,8 @@ def timed(name, failed=lambda r: False):
 
 def stats_line(total):
     parts = [f"{n} {c}회/실패{x}/{sec:.0f}초" for n, (c, x, sec) in STATS.items()]
+    if ARTICLE_ERRORS:
+        parts.append("기사오류 " + ",".join(f"{k}×{v}" for k, v in ARTICLE_ERRORS.items()))
     return f"총 {total:.0f}초 | " + " | ".join(parts)
 
 
@@ -462,7 +465,9 @@ def article(link):
             with urllib.request.urlopen(req, timeout=10) as r:
                 page = r.read().decode("utf-8", "replace")
             break
-        except Exception:
+        except Exception as e:
+            why = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
+            ARTICLE_ERRORS[why] = ARTICLE_ERRORS.get(why, 0) + 1
             if attempt:
                 return "", []
             time.sleep(1.5)
@@ -1279,6 +1284,10 @@ def selftest():
     assert now - parsedate_to_datetime("Mon, 01 Jan 2026 00:00:00 +0900") > FRESH_MAX_AGE
     assert now - parsedate_to_datetime(now.strftime("%a, %d %b %Y %H:%M:%S +0000")) <= FRESH_MAX_AGE
     assert is_photo_title("[포토] 국회 앞 기자회견") and is_photo_title("[화보] 촛불 행렬")
+    ARTICLE_ERRORS.clear(); STATS.clear()
+    ARTICLE_ERRORS["TimeoutError"] = 2
+    assert "기사오류 TimeoutError×2" in stats_line(1.0)
+    ARTICLE_ERRORS.clear()
     # 기사 페이지 병렬 선읽기: 느린 호출을 겹쳐서 기다린다. 한 건의 예외가 나머지를 막지 않는다.
     _o_article = globals()["article"]
     def _slow_article(l):
